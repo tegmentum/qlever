@@ -137,6 +137,8 @@ constexpr inline std::pair<std::string_view, std::string_view> XSD_PREFIX = {
     "xsd", "http://www.w3.org/2001/XMLSchema#"};
 constexpr inline std::pair<std::string_view, std::string_view> QL_PREFIX = {
     QLEVER_INTERNAL_PREFIX_NAME, QLEVER_INTERNAL_PREFIX_URL};
+constexpr inline std::pair<std::string_view, std::string_view> WF_PREFIX = {
+    "wf:", "http://tegmentum.ai/ns/webfunction/"};
 
 constexpr inline std::string_view QLEVER_INTERNAL_VARIABLE_PREFIX =
     "?_QLever_internal_variable_";

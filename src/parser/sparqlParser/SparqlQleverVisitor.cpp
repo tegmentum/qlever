@@ -21,6 +21,7 @@
 #include "backports/StartsWithAndEndsWith.h"
 #include "engine/SpatialJoinConfig.h"
 #include "engine/sparqlExpressions/BlankNodeExpression.h"
+#include "engine/sparqlExpressions/WfCallExpression.h"
 #include "engine/sparqlExpressions/CountStarExpression.h"
 #include "engine/sparqlExpressions/ExistsExpression.h"
 #include "engine/sparqlExpressions/GroupConcatExpression.h"
@@ -307,6 +308,18 @@ ExpressionPtr Visitor::processIriFunctionCall(
       return createBinary(&makePrefixMatchExpression);
     } else if (functionName == "simplifyGeometry") {
       return createBinary(&makeSimplifyGeometryExpression);
+    }
+  }
+
+  // tegmentum wf:call — invoke a WebAssembly module fetched from the given
+  // URL. Variadic: first arg is the URL, rest are string arguments.
+  if (checkPrefix(WF_PREFIX)) {
+    if (functionName == "call") {
+      if (argList.empty()) {
+        reportError(ctx,
+                    "wf:call requires at least one argument (the WASM URL)");
+      }
+      return makeWfCallExpression(std::move(argList));
     }
   }
 
