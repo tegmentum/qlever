@@ -49,3 +49,9 @@ sourcelist
 
 /cmake-build*
 /localIndices
+
+# qlever-wf-runtime is a build-time sync of the qlever-wf-runtime crate
+# (source of truth: ~/git/qlever-wf-runtime/). Dockerfile.wf rsyncs the
+# crate into ./qlever-wf-runtime/ before invoking `docker build` so the
+# legacy Docker builder can pick it up as part of the build context.
+/qlever-wf-runtime/
