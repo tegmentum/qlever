@@ -24,7 +24,8 @@ add_library(sparqlExpressions
         GeoExpression.cpp
         BlankNodeExpression.cpp
         GroupConcatExpression.cpp
-        WfCallExpression.cpp)
+        WfCallExpression.cpp
+        WasmRuntime.cpp)
 
 qlever_target_link_libraries(sparqlExpressions util index)
 
