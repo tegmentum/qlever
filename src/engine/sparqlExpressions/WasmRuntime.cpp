@@ -12,6 +12,19 @@
 // This translation unit is guarded on QLEVER_ENABLE_WF: when off, the
 // runtime falls back to a throwing stub so the option remains flippable
 // without touching call sites.
+//
+// Host callbacks (v0.3): we now construct the underlying runtime with a
+// WfCallbacks table so a component-model guest can invoke
+// stardog:webfunction/host@0.3.2's imports. `callback-depth` is wired to a
+// thread-local counter maintained here — it survives across re-entrancy
+// and, crucially, is per-thread so parallel query workers don't step on
+// each other. `execute-query` is intentionally left NULL for now: safely
+// re-entering QLever's query engine from inside a running query needs
+// deeper plumbing than a shim can honestly provide (task-group state,
+// index-scan iterators, and evaluator context all need to be threaded
+// through). Wiring the ABI slot but leaving the callback NULL lets guests
+// that never invoke execute-query run cleanly today, and lets a follow-up
+// change flip the switch without touching the ABI.
 
 #include "engine/sparqlExpressions/WasmRuntime.h"
 
@@ -26,13 +39,35 @@ namespace sparqlExpression::wf {
 
 #ifdef QLEVER_ENABLE_WF
 
+namespace {
+
+// Per-thread callback-depth counter. Multi-threaded query workers each
+// see their own counter, matching the Jena implementation's semantics.
+// Bumped/decremented around any host re-entrancy the runtime may drive.
+thread_local int gCallbackDepth = 0;
+
+extern "C" int wfCallbackDepth(void* /*user_data*/) { return gCallbackDepth; }
+
+}  // namespace
+
 struct WfRuntime::Impl {
   // The Rust crate hides all synchronization behind this opaque handle;
   // concurrent wf_runtime_invoke calls are safe.
   ::WfRuntime* handle_ = nullptr;
 
   Impl() {
-    handle_ = ::wf_runtime_new();
+    // Populate a callback table before constructing the runtime. We only
+    // wire callback_depth today; execute_query stays NULL so the guest
+    // sees a clean err<string> "not wired by embedder" if it reaches for
+    // it. See the file-level comment for the rationale.
+    ::WfCallbacks callbacks{};
+    callbacks.user_data = nullptr;
+    callbacks.execute_query = nullptr;
+    callbacks.callback_depth = &wfCallbackDepth;
+    callbacks.reserved_prepare_query = nullptr;
+    callbacks.reserved_run_prepared = nullptr;
+
+    handle_ = ::wf_runtime_new_with_callbacks(&callbacks);
     if (!handle_) {
       throw std::runtime_error("wf:call: wf_runtime_new returned NULL (OOM?)");
     }
