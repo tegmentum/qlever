@@ -24,18 +24,36 @@ ENV DEBIAN_FRONTEND=noninteractive
 FROM base AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y wget xz-utils
+# The ports.ubuntu.com arm64 mirror is regularly slow/timeout-prone from
+# behind Colima. Retry each apt-get step a handful of times; better a
+# 3-minute cold cache than a cache-invalidating "just re-run docker build".
+RUN for i in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y wget xz-utils && break; \
+        echo "apt attempt $i failed, sleeping"; sleep 15; \
+    done
 RUN wget https://apt.kitware.com/kitware-archive.sh \
     && chmod +x kitware-archive.sh && ./kitware-archive.sh
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake libicu-dev tzdata pkg-config uuid-runtime uuid-dev \
-        git libjemalloc-dev ninja-build libzstd-dev libssl-dev \
-        libboost1.83-dev libboost-program-options1.83-dev libboost-iostreams1.83-dev \
-        libboost-url1.83-dev libboost-container1.83-dev \
-        libcurl4-openssl-dev
+RUN for i in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            build-essential cmake libicu-dev tzdata pkg-config uuid-runtime uuid-dev \
+            git libjemalloc-dev ninja-build libzstd-dev libssl-dev \
+            libboost1.83-dev libboost-program-options1.83-dev libboost-iostreams1.83-dev \
+            libboost-url1.83-dev libboost-container1.83-dev \
+            libcurl4-openssl-dev && break; \
+        echo "apt attempt $i failed, sleeping"; sleep 15; \
+    done
 
-# wasmtime C API — will be re-enabled once the invocation code lands.
-# Deferred to keep the initial fork bootstrap fast.
+# wasmtime C API prebuilt. v27.0.0 matches the header set the wf:call
+# glue was written against. Layout: include/wasm.h, include/wasmtime.h,
+# include/wasmtime/*.h; lib/libwasmtime.so.
+ARG WASMTIME_VER=27.0.0
+RUN wget -qO /tmp/wt.tar.xz \
+      https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VER}/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api.tar.xz \
+    && tar -C /tmp -xf /tmp/wt.tar.xz \
+    && cp -r /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api/include/* /usr/local/include/ \
+    && cp /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api/lib/libwasmtime.so /usr/local/lib/ \
+    && ldconfig \
+    && rm -rf /tmp/wt.tar.xz /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api
 
 COPY src /qlever/src/
 COPY test /qlever/test/
@@ -49,6 +67,7 @@ COPY GitVersion.cmake /qlever/
 WORKDIR /qlever/build/
 RUN cmake -DCMAKE_BUILD_TYPE=Release -DLOGLEVEL=INFO -DUSE_PARALLEL=true \
           -D_NO_TIMING_TESTS=ON -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE \
+          -DQLEVER_ENABLE_WF=ON \
           -GNinja ..
 # Constrain parallelism — the QLever PCH + template-heavy translation units
 # each need >1 GB. Under Colima's default 2 GB VM allocation on a Mac host,
@@ -61,14 +80,19 @@ FROM base AS runtime
 WORKDIR /qlever
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget python3-yaml unzip curl bzip2 pkg-config libicu74 python3-icu \
-        libgomp1 uuid-runtime make lbzip2 libjemalloc2 libzstd1 \
-        libboost-program-options1.83.0 libboost-iostreams1.83.0 libboost-url1.83.0 \
-        libcurl4 pipx bash-completion vim sudo \
-    && rm -rf /var/lib/apt/lists/*
+RUN for i in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            wget python3-yaml unzip curl bzip2 pkg-config libicu74 python3-icu \
+            libgomp1 uuid-runtime make lbzip2 libjemalloc2 libzstd1 \
+            libboost-program-options1.83.0 libboost-iostreams1.83.0 libboost-url1.83.0 \
+            libcurl4 pipx bash-completion vim sudo && break; \
+        echo "apt attempt $i failed, sleeping"; sleep 15; \
+    done && rm -rf /var/lib/apt/lists/*
 
-# wasmtime runtime .so is not yet linked; runtime stage stays lean.
+# Ship libwasmtime.so from the builder so the qlever-server binary can
+# find it at runtime. The C API tarball ships a single shared object.
+COPY --from=builder /usr/local/lib/libwasmtime.so /usr/local/lib/
+RUN ldconfig
 
 RUN groupadd -r qlever && useradd --no-log-init -d /qlever -r -g qlever qlever \
     && chown qlever:qlever /qlever \
@@ -87,8 +111,17 @@ ENV QLEVER_ARGCOMPLETE_ENABLED=1
 ENV QLEVER_IS_RUNNING_IN_CONTAINER=1
 
 COPY --from=builder /qlever/build/qlever-* /qlever/
-COPY --from=builder /qlever/build/*Main /qlever/
+# Upstream ships benchmark/main binaries (*Main); our cmake target list is
+# `qlever-index qlever-server` only, so *Main artifacts don't exist. Drop
+# the COPY rather than adding a placeholder that would need cleanup later.
 COPY --from=builder /qlever/e2e/* /qlever/e2e/
-COPY --chmod=755 docker-entrypoint.sh /qlever/
+# `--chmod` on COPY is a BuildKit-only feature; the legacy builder used
+# here (buildx is unavailable under this Colima's daemon-driver mismatch)
+# rejects it. Chmod must happen while we're still root — after `USER qlever`
+# below it fails with EPERM — so drop back to root for this one step.
+USER root
+COPY docker-entrypoint.sh /qlever/
+RUN chmod 755 /qlever/docker-entrypoint.sh
+USER qlever
 
 ENTRYPOINT ["/qlever/docker-entrypoint.sh"]
