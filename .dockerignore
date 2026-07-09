@@ -8,3 +8,9 @@
 !CompilationInfo.cmake
 !GitVersion.cmake
 !docker-entrypoint.sh
+# qlever-wf-runtime is synced into the build context by the Dockerfile.wf
+# invocation; keep the target/ subdirectory out so macOS build artifacts
+# don't bloat the copy (or fool cargo into rebuilding partially).
+!qlever-wf-runtime
+qlever-wf-runtime/target
+qlever-wf-runtime/.dockerignore

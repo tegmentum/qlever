@@ -3,14 +3,29 @@
 # QLever + tegmentum wf:call.
 #
 # Extends the upstream QLever Dockerfile with:
-#   * libcurl (for wf:call HTTP resolution)
-#   * bytecodealliance wasmtime C API prebuilt (linked into sparqlExpressions)
-#   * -DQLEVER_ENABLE_WF=ON at cmake time
+#   * A build of the qlever-wf-runtime Rust crate (component-model + core-
+#     module wasm host, exposed as a C ABI static archive)
+#   * -DQLEVER_ENABLE_WF=ON at cmake time, pointing at the crate's header
+#     and static archive
 #   * RUN_TESTS=false so we ship a build without waiting on the full suite
 #
-# Build (arm64, on Apple Silicon under Colima):
-#   DOCKER_BUILDKIT=0 docker build --platform linux/arm64 \
-#       -f Dockerfile.wf -t qlever-wf:0.1.0 .
+# The Rust crate embeds wasmtime + cranelift, so we no longer install the
+# libwasmtime.so shared object into the runtime stage — everything the
+# wf:call path needs is statically linked into qlever-server.
+#
+# Build context requires the qlever-wf-runtime crate to be sitting inside
+# the qlever repo at ./qlever-wf-runtime/. The crate itself lives at
+# ~/git/qlever-wf-runtime/; sync it into the qlever context before
+# building. The `--build-context wf=` syntax that would sidestep this
+# needs BuildKit, which is unavailable under this Colima setup (legacy
+# builder only). We avoid using ~/git/ as the build context because it
+# contains hundreds of unrelated repos and unreadable files that break
+# the legacy builder's context-walk step.
+#
+# Invocation (arm64, on Apple Silicon under Colima):
+#   rsync -a --delete ../qlever-wf-runtime/ qlever-wf-runtime/ \
+#     && DOCKER_BUILDKIT=0 docker build --platform linux/arm64 \
+#        -f Dockerfile.wf -t qlever-wf:0.2.0 .
 
 FROM ubuntu:24.04 AS base
 LABEL maintainer="tegmentum"
@@ -28,7 +43,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # behind Colima. Retry each apt-get step a handful of times; better a
 # 3-minute cold cache than a cache-invalidating "just re-run docker build".
 RUN for i in 1 2 3 4 5; do \
-        apt-get update && apt-get install -y wget xz-utils && break; \
+        apt-get update && apt-get install -y wget xz-utils curl ca-certificates && break; \
         echo "apt attempt $i failed, sleeping"; sleep 15; \
     done
 RUN wget https://apt.kitware.com/kitware-archive.sh \
@@ -38,23 +53,45 @@ RUN for i in 1 2 3 4 5; do \
             build-essential cmake libicu-dev tzdata pkg-config uuid-runtime uuid-dev \
             git libjemalloc-dev ninja-build libzstd-dev libssl-dev \
             libboost1.83-dev libboost-program-options1.83-dev libboost-iostreams1.83-dev \
-            libboost-url1.83-dev libboost-container1.83-dev \
-            libcurl4-openssl-dev && break; \
+            libboost-url1.83-dev libboost-container1.83-dev && break; \
         echo "apt attempt $i failed, sleeping"; sleep 15; \
     done
 
-# wasmtime C API prebuilt. v27.0.0 matches the header set the wf:call
-# glue was written against. Layout: include/wasm.h, include/wasmtime.h,
-# include/wasmtime/*.h; lib/libwasmtime.so.
-ARG WASMTIME_VER=27.0.0
-RUN wget -qO /tmp/wt.tar.xz \
-      https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VER}/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api.tar.xz \
-    && tar -C /tmp -xf /tmp/wt.tar.xz \
-    && cp -r /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api/include/* /usr/local/include/ \
-    && cp /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api/lib/libwasmtime.so /usr/local/lib/ \
-    && ldconfig \
-    && rm -rf /tmp/wt.tar.xz /tmp/wasmtime-v${WASMTIME_VER}-aarch64-linux-c-api
+# --- Rust toolchain -----------------------------------------------------------
+# We build the qlever-wf-runtime crate as a static library; that crate is
+# where the wasmtime component-model support lives. wasmtime 46 declares
+# rust-version = "1.94.0" on every subcrate, so anything older fails the
+# `--locked` MSRV check with a wall of "requires rustc 1.94.0" messages.
+# This layer is placed BEFORE any source copy so it lands in the Docker
+# cache and survives edits to the C++ code.
+ARG RUST_VERSION=1.94.0
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal \
+      --no-modify-path \
+    && rustc --version && cargo --version
 
+# --- qlever-wf-runtime static build ------------------------------------------
+# The crate is copied whole; there is no separate manifest-only stage
+# because the legacy builder can't cross-mount a dedicated build context
+# for it. Since this COPY sits before the C++ source COPY that follows,
+# edits to qlever's C++ source will still hit the Docker cache and skip
+# the ~5-minute wasmtime compile.
+COPY qlever-wf-runtime /qlever-wf-runtime/
+WORKDIR /qlever-wf-runtime
+# Try --locked first so a checked-in Cargo.lock is respected; fall back
+# to a lockless build so this Dockerfile still works pre-lock.
+RUN cargo build --release --locked || cargo build --release
+# Copy built artifacts into cmake-discoverable locations. Doing this here
+# rather than inline with the cmake step keeps the C++ build's dependency
+# hash decoupled from the Rust build.
+RUN mkdir -p /usr/local/include/qlever-wf-runtime \
+    && cp include/qlever_wf_runtime.h /usr/local/include/qlever-wf-runtime/ \
+    && cp target/release/libqlever_wf_runtime.a /usr/local/lib/
+
+# --- QLever build -------------------------------------------------------------
 COPY src /qlever/src/
 COPY test /qlever/test/
 COPY e2e /qlever/e2e/
@@ -68,6 +105,8 @@ WORKDIR /qlever/build/
 RUN cmake -DCMAKE_BUILD_TYPE=Release -DLOGLEVEL=INFO -DUSE_PARALLEL=true \
           -D_NO_TIMING_TESTS=ON -DCOMPILER_SUPPORTS_MARCH_NATIVE=FALSE \
           -DQLEVER_ENABLE_WF=ON \
+          -DQLEVER_WF_RUNTIME_INCLUDE_DIR=/usr/local/include/qlever-wf-runtime \
+          -DQLEVER_WF_RUNTIME_LIB=/usr/local/lib/libqlever_wf_runtime.a \
           -GNinja ..
 # Constrain parallelism — the QLever PCH + template-heavy translation units
 # each need >1 GB. Under Colima's default 2 GB VM allocation on a Mac host,
@@ -85,14 +124,14 @@ RUN for i in 1 2 3 4 5; do \
             wget python3-yaml unzip curl bzip2 pkg-config libicu74 python3-icu \
             libgomp1 uuid-runtime make lbzip2 libjemalloc2 libzstd1 \
             libboost-program-options1.83.0 libboost-iostreams1.83.0 libboost-url1.83.0 \
-            libcurl4 pipx bash-completion vim sudo && break; \
+            pipx bash-completion vim sudo && break; \
         echo "apt attempt $i failed, sleeping"; sleep 15; \
     done && rm -rf /var/lib/apt/lists/*
 
-# Ship libwasmtime.so from the builder so the qlever-server binary can
-# find it at runtime. The C API tarball ships a single shared object.
-COPY --from=builder /usr/local/lib/libwasmtime.so /usr/local/lib/
-RUN ldconfig
+# wasmtime + rustls are compiled into libqlever_wf_runtime.a which is in turn
+# statically linked into qlever-server, so no shared-library copy is needed
+# here. If a future runtime dep leaks (e.g. wasmtime is switched back to a
+# dylib), diagnose via `ldd /qlever/qlever-server` and add the COPY back.
 
 RUN groupadd -r qlever && useradd --no-log-init -d /qlever -r -g qlever qlever \
     && chown qlever:qlever /qlever \
