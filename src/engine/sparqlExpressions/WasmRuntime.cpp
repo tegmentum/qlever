@@ -242,10 +242,13 @@ std::string httpPost(const std::string& host, int port,
     throw std::runtime_error(std::string{"connect: "} + std::strerror(errno));
   }
 
+  // HTTP/1.0 forces identity Transfer-Encoding — HTTP/1.1 clients get
+  // chunked responses from qlever-server, and we'd rather skip the chunk
+  // decoder in this shim.
   std::ostringstream req;
-  req << "POST " << path << " HTTP/1.1\r\n"
+  req << "POST " << path << " HTTP/1.0\r\n"
       << "Host: " << host << ":" << port << "\r\n"
-      << "User-Agent: qlever-wf-loopback/0.5\r\n"
+      << "User-Agent: qlever-wf-loopback/0.6\r\n"
       << "Content-Type: " << content_type << "\r\n"
       << "Accept: " << accept << "\r\n"
       << "Content-Length: " << body.size() << "\r\n"
