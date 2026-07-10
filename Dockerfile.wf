@@ -25,7 +25,16 @@
 # Invocation (arm64, on Apple Silicon under Colima):
 #   rsync -a --delete ../qlever-wf-runtime/ qlever-wf-runtime/ \
 #     && DOCKER_BUILDKIT=0 docker build --platform linux/arm64 \
-#        -f Dockerfile.wf -t qlever-wf:0.2.0 .
+#        -f Dockerfile.wf -t qlever-wf:0.5.0 .
+#
+# 0.5.0 changes: WasmRuntime.cpp now wires the `execute-query` host
+# callback via HTTP loopback to qlever-server, so component-mode guests
+# that use the SPARQL callback API (wf_tree, wf_tree_rows, adjacency_tree
+# once run-prepared lands) can hit the outer server's index. Requires
+# qlever-server to run with `--num-simultaneous-queries` >= 2 so the
+# callback thread doesn't deadlock waiting on itself, and
+# QLEVER_LOOPBACK_PORT set to the same port qlever-server binds. Both are
+# defaulted below.
 
 FROM ubuntu:24.04 AS base
 LABEL maintainer="tegmentum"
@@ -138,8 +147,15 @@ RUN groupadd -r qlever && useradd --no-log-init -d /qlever -r -g qlever qlever \
     && echo "qlever ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 ENV QLEVER_PROFILE=/etc/profile.d/qlever.sh
+# The wf loopback port defaults to 7001 to match the tests. `su -` in the
+# entrypoint resets environment, so we export from profile rather than
+# relying on the Docker ENV survivng the login-shell handoff. A `-e
+# QLEVER_LOOPBACK_PORT=X` at `docker run` gets copied over the default
+# by the entrypoint (see docker-entrypoint.sh) before this profile is
+# sourced.
 RUN echo "eval \"\$(register-python-argcomplete qlever)\"" >> $QLEVER_PROFILE \
     && echo "export QLEVER_ARGCOMPLETE_ENABLED=1 && export QLEVER_IS_RUNNING_IN_CONTAINER=1" >> $QLEVER_PROFILE \
+    && echo "export QLEVER_LOOPBACK_PORT=\${QLEVER_LOOPBACK_PORT:-7001}" >> $QLEVER_PROFILE \
     && echo "PATH=/qlever:/qlever/.local/bin:\$PATH && PS1=\"\\u@docker:\\W\\$ \"" >> $QLEVER_PROFILE \
     && cp $QLEVER_PROFILE /qlever/.bashrc
 

@@ -57,6 +57,24 @@ if ! whoami > /dev/null || [ "$(whoami)" != "qlever" ]; then
   exec bash --login "$@"
 fi
 
+# Propagate wf loopback config into the login shell. `su - qlever --login`
+# resets the environment, so we bake the current value into a
+# profile-fragment that gets sourced by the login shell after the reset.
+# The `-e QLEVER_LOOPBACK_PORT=X` route through `docker run` lands here as
+# an inherited env var; without one we fall back to the Dockerfile default
+# already exported by /etc/profile.d/qlever.sh. Same story for the wf
+# concurrency floor — qlever-server needs `-j` >= 2 so the callback
+# thread and the nested query it fires can coexist; embedders can raise
+# this via QLEVER_WF_JOBS.
+if [ -n "$QLEVER_LOOPBACK_PORT" ]; then
+  echo "export QLEVER_LOOPBACK_PORT=$QLEVER_LOOPBACK_PORT" \
+    | sudo tee /etc/profile.d/qlever-wf-runtime.sh > /dev/null
+fi
+if [ -n "$QLEVER_WF_JOBS" ]; then
+  echo "export QLEVER_WF_JOBS=$QLEVER_WF_JOBS" \
+    | sudo tee -a /etc/profile.d/qlever-wf-runtime.sh > /dev/null
+fi
+
 # With `-e UID=... -e GID=...`, change the UID and GID of the user `qlever` inside
 # the container accordingly.
 #
