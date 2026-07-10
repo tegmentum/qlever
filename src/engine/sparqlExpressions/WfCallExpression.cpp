@@ -108,34 +108,52 @@ std::optional<nlohmann::json> childArgToJson(
   std::visit(
       [&](auto&& val) {
         using T = std::decay_t<decltype(val)>;
-        // Extract a single IdOrLocalVocabEntry from either the scalar or
-        // the batched-constant shape. QLever wraps compile-time constants
-        // in a VectorWithMemoryLimit that broadcasts across the row set;
-        // for BIND-context we peel off the first element.
-        const IdOrLocalVocabEntry* pick = nullptr;
+        // Extract a single constant from any of the four QLever
+        // ExpressionResult shapes that can carry a broadcast constant.
+        // A scalar constant may arrive as either IdOrLocalVocabEntry
+        // (vocab-carrying) or a bare ValueId (encoded numeric / small
+        // vocab id). Both shapes also appear wrapped in a
+        // VectorWithMemoryLimit that broadcasts across the row set —
+        // for BIND-context we peel off the first element. Anything else
+        // (Variable, SetOfIntervals) is a non-constant we can't marshal
+        // in v0.2.
+        std::optional<LocalVocabEntry> lveHolder;
+        std::optional<ValueId> idHolder;
         if constexpr (std::is_same_v<T, IdOrLocalVocabEntry>) {
-          pick = &val;
+          if (std::holds_alternative<LocalVocabEntry>(val)) {
+            lveHolder = std::get<LocalVocabEntry>(val);
+          } else {
+            idHolder = std::get<ValueId>(val);
+          }
         } else if constexpr (std::is_same_v<
                                  T,
                                  VectorWithMemoryLimit<IdOrLocalVocabEntry>>) {
-          if (!val.empty()) pick = &val.front();
+          if (!val.empty()) {
+            const auto& first = val.front();
+            if (std::holds_alternative<LocalVocabEntry>(first)) {
+              lveHolder = std::get<LocalVocabEntry>(first);
+            } else {
+              idHolder = std::get<ValueId>(first);
+            }
+          }
+        } else if constexpr (std::is_same_v<T, ValueId>) {
+          idHolder = val;
+        } else if constexpr (std::is_same_v<
+                                 T, VectorWithMemoryLimit<ValueId>>) {
+          if (!val.empty()) idHolder = val.front();
         }
-        if (pick == nullptr) return;  // Variable / other — v0.2 rejects.
-        if (std::holds_alternative<LocalVocabEntry>(*pick)) {
-          const auto& lve = std::get<LocalVocabEntry>(*pick);
-          out = literalOrIriToJsonValue(lve.asLiteralOrIri());
+
+        if (lveHolder.has_value()) {
+          out = literalOrIriToJsonValue(lveHolder->asLiteralOrIri());
           return;
         }
-        const auto& id = std::get<ValueId>(*pick);
-        if (id.isUndefined()) {
+        if (!idHolder.has_value() || idHolder->isUndefined()) {
           return;  // out stays nullopt
         }
-        // Encoded numeric/date/etc. — resolve via the exportIds helper
-        // so we get a proper LiteralOrIri irrespective of storage.
-        // `Index` has an implicit conversion to `const IndexImpl&` so we
-        // don't need to spell out `.getImpl()` here.
+        // Encoded numeric/date/small-vocab-id — resolve via the exportIds
+        // helper so we get a proper LiteralOrIri regardless of storage.
         auto lit = ql::exportIds::idToLiteralOrIri(
-            context->_qec.getIndex(), id, context->_localVocab);
+            context->_qec.getIndex(), *idHolder, context->_localVocab);
         if (lit.has_value()) {
           out = literalOrIriToJsonValue(lit.value());
         }
