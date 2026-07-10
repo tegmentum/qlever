@@ -108,28 +108,37 @@ std::optional<nlohmann::json> childArgToJson(
   std::visit(
       [&](auto&& val) {
         using T = std::decay_t<decltype(val)>;
+        // Extract a single IdOrLocalVocabEntry from either the scalar or
+        // the batched-constant shape. QLever wraps compile-time constants
+        // in a VectorWithMemoryLimit that broadcasts across the row set;
+        // for BIND-context we peel off the first element.
+        const IdOrLocalVocabEntry* pick = nullptr;
         if constexpr (std::is_same_v<T, IdOrLocalVocabEntry>) {
-          if (std::holds_alternative<LocalVocabEntry>(val)) {
-            const auto& lve = std::get<LocalVocabEntry>(val);
-            out = literalOrIriToJsonValue(lve.asLiteralOrIri());
-            return;
-          }
-          const auto& id = std::get<ValueId>(val);
-          if (id.isUndefined()) {
-            return;  // out stays nullopt
-          }
-          // Encoded numeric/date/etc. — resolve via the exportIds helper
-          // so we get a proper LiteralOrIri irrespective of storage.
-          // `Index` has an implicit conversion to `const IndexImpl&` so we
-          // don't need to spell out `.getImpl()` here.
-          auto lit = ql::exportIds::idToLiteralOrIri(
-              context->_qec.getIndex(), id, context->_localVocab);
-          if (lit.has_value()) {
-            out = literalOrIriToJsonValue(lit.value());
-          }
+          pick = &val;
+        } else if constexpr (std::is_same_v<
+                                 T,
+                                 VectorWithMemoryLimit<IdOrLocalVocabEntry>>) {
+          if (!val.empty()) pick = &val.front();
         }
-        // Vector / variable / other non-constant shapes fall through
-        // to nullopt — v0.2 rejects them; the SERVICE path can revisit.
+        if (pick == nullptr) return;  // Variable / other — v0.2 rejects.
+        if (std::holds_alternative<LocalVocabEntry>(*pick)) {
+          const auto& lve = std::get<LocalVocabEntry>(*pick);
+          out = literalOrIriToJsonValue(lve.asLiteralOrIri());
+          return;
+        }
+        const auto& id = std::get<ValueId>(*pick);
+        if (id.isUndefined()) {
+          return;  // out stays nullopt
+        }
+        // Encoded numeric/date/etc. — resolve via the exportIds helper
+        // so we get a proper LiteralOrIri irrespective of storage.
+        // `Index` has an implicit conversion to `const IndexImpl&` so we
+        // don't need to spell out `.getImpl()` here.
+        auto lit = ql::exportIds::idToLiteralOrIri(
+            context->_qec.getIndex(), id, context->_localVocab);
+        if (lit.has_value()) {
+          out = literalOrIriToJsonValue(lit.value());
+        }
       },
       res);
   return out;
