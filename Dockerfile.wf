@@ -25,12 +25,22 @@
 # Invocation (arm64, on Apple Silicon under Colima):
 #   rsync -a --delete ../qlever-wf-runtime/ qlever-wf-runtime/ \
 #     && DOCKER_BUILDKIT=0 docker build --platform linux/arm64 \
-#        -f Dockerfile.wf -t qlever-wf:0.5.0 .
+#        -f Dockerfile.wf -t qlever-wf:0.7.0 .
 #
-# 0.5.0 changes: WasmRuntime.cpp now wires the `execute-query` host
-# callback via HTTP loopback to qlever-server, so component-mode guests
-# that use the SPARQL callback API (wf_tree, wf_tree_rows, adjacency_tree
-# once run-prepared lands) can hit the outer server's index. Requires
+# 0.7.0 changes: qlever-wf-runtime now registers the six-import v0.3.x
+# host callback set on both @0.3.2 and @0.4.0 interface names (via a
+# shared helper — the closures are identical, only the interface path
+# differs) and adds `invoke-wasm` on @0.4.0. Nested wasm invocation from
+# a guest (wf_apply, wf_map) now works: the runtime fetches the target
+# wasm, compiles + caches it, and instantiates into a fresh Store that
+# inherits the outer HostBridge so nested execute-query callbacks
+# continue to reach qlever-server via loopback. No C++ changes; the
+# version-agnostic C ABI absorbed the update transparently.
+#
+# 0.5.0 changes: WasmRuntime.cpp wires the `execute-query` host callback
+# via HTTP loopback to qlever-server, so component-mode guests that use
+# the SPARQL callback API (wf_tree, wf_tree_rows, adjacency_tree once
+# run-prepared lands) can hit the outer server's index. Requires
 # qlever-server to run with `--num-simultaneous-queries` >= 2 so the
 # callback thread doesn't deadlock waiting on itself, and
 # QLEVER_LOOPBACK_PORT set to the same port qlever-server binds. Both are
