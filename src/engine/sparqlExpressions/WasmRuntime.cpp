@@ -551,6 +551,61 @@ struct WfRuntime::Impl {
     ::wf_runtime_free_string(out);
     return result;
   }
+
+  // Loaders — one thin FFI hop each. On non-zero return the Rust runtime
+  // has populated `err` with a heap C string we own; wrap it in a
+  // std::runtime_error the caller (ServerMain) can react to.
+  void loadAliasMap(const std::string& dbPath, const std::string& table) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_alias_map_from_sqlite(
+        handle_, dbPath.c_str(), table.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-alias-map failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
+  void loadShapeRegistry(const std::string& dbPath, const std::string& table) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_shape_registry_from_sqlite(
+        handle_, dbPath.c_str(), table.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-shape-registry failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
+  void loadConversionRegistry(const std::string& jsonPath) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_conversion_registry_from_json(
+        handle_, jsonPath.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-conversion-registry failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
+  void setFetchUrl(const std::string& url) {
+    char* err = nullptr;
+    const unsigned int rc =
+        ::wf_runtime_set_wf_fetch_url(handle_, url.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: set-wf-fetch-url failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
 };
 
 WfRuntime::WfRuntime() : impl_(new Impl()) {}
@@ -577,6 +632,24 @@ RewriteResult WfRuntime::rewriteQuery(std::string_view query) {
 
 std::string WfRuntime::invokeById(std::string_view idHex) {
   return impl_->invokeById(std::string{idHex});
+}
+
+void WfRuntime::loadAliasMapFromSqlite(std::string_view dbPath,
+                                       std::string_view table) {
+  impl_->loadAliasMap(std::string{dbPath}, std::string{table});
+}
+
+void WfRuntime::loadShapeRegistryFromSqlite(std::string_view dbPath,
+                                            std::string_view table) {
+  impl_->loadShapeRegistry(std::string{dbPath}, std::string{table});
+}
+
+void WfRuntime::loadConversionRegistryFromJson(std::string_view jsonPath) {
+  impl_->loadConversionRegistry(std::string{jsonPath});
+}
+
+void WfRuntime::setWfFetchUrl(std::string_view url) {
+  impl_->setFetchUrl(std::string{url});
 }
 
 #else  // !QLEVER_ENABLE_WF
@@ -609,6 +682,31 @@ std::string WfRuntime::invokeById(std::string_view) {
   throw std::runtime_error(
       "wf-invoke: this QLever build was compiled without QLEVER_ENABLE_WF; "
       "SERVICE <wf-invoke:...> cannot be evaluated.");
+}
+
+// Loaders throw when the runtime is compiled out. Server main should
+// treat any --wf-* flag as user error against a build without wf and
+// exit non-zero rather than silently ignore the flag.
+static void wfDisabledThrow(const char* flag) {
+  throw std::runtime_error(
+      std::string{"wf: --"} + flag +
+      " requires this build to have been compiled with -DQLEVER_ENABLE_WF=ON");
+}
+
+void WfRuntime::loadAliasMapFromSqlite(std::string_view, std::string_view) {
+  wfDisabledThrow("wf-alias-db");
+}
+
+void WfRuntime::loadShapeRegistryFromSqlite(std::string_view, std::string_view) {
+  wfDisabledThrow("wf-shape-db");
+}
+
+void WfRuntime::loadConversionRegistryFromJson(std::string_view) {
+  wfDisabledThrow("wf-conversion-rules");
+}
+
+void WfRuntime::setWfFetchUrl(std::string_view) {
+  wfDisabledThrow("wf-fetch-url");
 }
 
 #endif
