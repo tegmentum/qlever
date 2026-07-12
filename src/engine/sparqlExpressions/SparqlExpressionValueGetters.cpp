@@ -332,7 +332,11 @@ OptIri DatatypeValueGetter::operator()(ValueId id,
     case Double:
       return Iri::fromIrirefWithoutBrackets(XSD_DOUBLE_TYPE);
     case Int:
-      return Iri::fromIrirefWithoutBrackets(XSD_INT_TYPE);
+      // Match the datatype emitted on the wire by
+      // `idToStringAndTypeForEncodedValue`: `Datatype::Int` collapses all
+      // XSD integer subtypes, so `DATATYPE(?x)` returns `xsd:integer` — the
+      // parent type per the SPARQL/XSD spec.
+      return Iri::fromIrirefWithoutBrackets(XSD_INTEGER_TYPE);
     case GeoPoint:
       return Iri::fromIrirefWithoutBrackets(GEO_WKT_LITERAL);
     case Date: {

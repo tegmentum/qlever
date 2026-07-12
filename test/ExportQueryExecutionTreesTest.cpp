@@ -358,13 +358,13 @@ TEST(ExportQueryExecutionTrees, Integers) {
   std::string expectedXml = makeXMLHeader({"o"}) +
                             R"(
   <result>
-    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#int">-42019234865781</literal></binding>
+    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#integer">-42019234865781</literal></binding>
   </result>
   <result>
-    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#int">42</literal></binding>
+    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#integer">42</literal></binding>
   </result>
   <result>
-    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#int">4012934858173560</literal></binding>
+    <binding name="o"><literal datatype="http://www.w3.org/2001/XMLSchema#integer">4012934858173560</literal></binding>
   </result>)" + xmlTrailer;
   TestCaseSelectQuery testCase{
       kg, query, 3,
@@ -379,15 +379,15 @@ TEST(ExportQueryExecutionTrees, Integers) {
       "42\n"
       "4012934858173560\n",
       makeExpectedQLeverJSON(
-          {"\"-42019234865781\"^^<http://www.w3.org/2001/XMLSchema#int>"s,
-           "\"42\"^^<http://www.w3.org/2001/XMLSchema#int>"s,
-           "\"4012934858173560\"^^<http://www.w3.org/2001/XMLSchema#int>"s}),
+          {"\"-42019234865781\"^^<http://www.w3.org/2001/XMLSchema#integer>"s,
+           "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"s,
+           "\"4012934858173560\"^^<http://www.w3.org/2001/XMLSchema#integer>"s}),
       makeExpectedSparqlJSON(
-          {makeJSONBinding("http://www.w3.org/2001/XMLSchema#int", "literal",
+          {makeJSONBinding("http://www.w3.org/2001/XMLSchema#integer", "literal",
                            "-42019234865781"),
-           makeJSONBinding("http://www.w3.org/2001/XMLSchema#int", "literal",
+           makeJSONBinding("http://www.w3.org/2001/XMLSchema#integer", "literal",
                            "42"),
-           makeJSONBinding("http://www.w3.org/2001/XMLSchema#int", "literal",
+           makeJSONBinding("http://www.w3.org/2001/XMLSchema#integer", "literal",
                            "4012934858173560")}),
       expectedXml};
   runSelectQueryTestCase(testCase);

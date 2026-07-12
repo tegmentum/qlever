@@ -72,7 +72,11 @@ std::string formatTerm(const EvaluatedTermData& term, bool includeDataType) {
     // IRI, blank node, or vocab-indexed literal: already in final form.
     return term.rdfTermString_;
   }
-  const char* i = XSD_INT_TYPE;
+  // `XSD_INTEGER_TYPE` here mirrors the type string that
+  // `idToStringAndTypeForEncodedValue` now emits for `Datatype::Int`. This
+  // is a pointer-equality check against that source, so the two constants
+  // must stay in sync.
+  const char* i = XSD_INTEGER_TYPE;
   const char* d = XSD_DECIMAL_TYPE;
   const char* b = XSD_BOOLEAN_TYPE;
 
