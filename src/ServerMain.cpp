@@ -14,6 +14,7 @@
 
 #include "CompilationInfo.h"
 #include "engine/Server.h"
+#include "engine/sparqlExpressions/WasmRuntime.h"
 #include "global/Constants.h"
 #include "global/RuntimeParameters.h"
 #include "libqlever/Qlever.h"
@@ -52,6 +53,18 @@ int main(int argc, char** argv) {
   unsigned short port;
   NonNegative numSimultaneousQueries = 1;
   bool noMetricsLog = false;
+
+  // wf:call configuration — populated below via optional CLI flags, then
+  // pushed into the singleton WfRuntime after po::notify but before the
+  // server starts serving queries. All four flags are optional; when none
+  // are supplied the runtime boots with empty registries and the rewrite
+  // passes stay cheap identities (the pre-flags behaviour).
+  std::string wfAliasDb;
+  std::string wfAliasTable = "aliases";
+  std::string wfShapeDb;
+  std::string wfShapeTable = "shapes";
+  std::string wfConversionRules;
+  std::string wfFetchUrl;
 
   ad_utility::ParameterToProgramOptionFactory optionFactory{
       &globalRuntimeParameters};
@@ -204,6 +217,38 @@ int main(int argc, char** argv) {
       "Default is INFO. The compile-time level (CMake -DLOGLEVEL=...) applies "
       "as an upper bound — messages above it are never emitted regardless of "
       "this setting.");
+  // wf:call configuration loaders. All optional; the runtime boots with
+  // empty registries when nothing is supplied. On any load failure the
+  // server exits non-zero rather than serving with a half-configured
+  // rewrite state — a silently misconfigured shape/alias/conversion
+  // registry would produce mis-routed queries at runtime that would be
+  // far harder to diagnose than a startup-time abort.
+  add("wf-alias-db", po::value<std::string>(&wfAliasDb)->default_value(""),
+      "Path to a SQLite database containing the wf:call alias map. If set, "
+      "the runtime loads the `aliases` table (or the table named by "
+      "--wf-alias-table) at boot so alias→canonical rewrites take effect.");
+  add("wf-alias-table",
+      po::value<std::string>(&wfAliasTable)->default_value("aliases"),
+      "Table name inside --wf-alias-db (default: `aliases`).");
+  add("wf-shape-db", po::value<std::string>(&wfShapeDb)->default_value(""),
+      "Path to a SQLite database containing the wf:call shape registry. If "
+      "set, the runtime loads the `shapes` table (or the table named by "
+      "--wf-shape-table) at boot so BGP→wf_fetch shape rewrites take effect. "
+      "Requires --wf-fetch-url to have effect.");
+  add("wf-shape-table",
+      po::value<std::string>(&wfShapeTable)->default_value("shapes"),
+      "Table name inside --wf-shape-db (default: `shapes`).");
+  add("wf-conversion-rules",
+      po::value<std::string>(&wfConversionRules)->default_value(""),
+      "Path to a JSON file of conversion rules. Format: "
+      "`{\"rules\":[{\"source_predicate\":..,\"target_predicate\":..,"
+      "\"expression\":..}, ...]}`. Populates the runtime's conversion "
+      "registry at boot so `GRAPH <urn:wf:conversion:*>` rewrites take "
+      "effect.");
+  add("wf-fetch-url", po::value<std::string>(&wfFetchUrl)->default_value(""),
+      "URL of the wf_fetch wasm module used by the shape rewrite pass. "
+      "Empty (the default) disables shape rewriting even when "
+      "--wf-shape-db is populated.");
   add("construct-deduplication",
       optionFactory
           .getProgramOption<&RuntimeParameters::constructDeduplication_>(),
@@ -236,6 +281,36 @@ int main(int argc, char** argv) {
               << ", compiled on " << qlever::version::DatetimeOfCompilation
               << " using git hash " << qlever::version::GitShortHash << EMPH_OFF
               << std::endl;
+
+  // Push wf:call configuration into the runtime BEFORE the server accepts
+  // its first request. Any load failure is fatal — a half-configured
+  // rewrite state would silently produce wrong query plans.
+  try {
+    auto& wfRuntime = sparqlExpression::wf::WfRuntime::instance();
+    if (!wfAliasDb.empty()) {
+      wfRuntime.loadAliasMapFromSqlite(wfAliasDb, wfAliasTable);
+      AD_LOG_INFO << "wf: loaded alias map from " << wfAliasDb << " (table `"
+                  << wfAliasTable << "`)" << std::endl;
+    }
+    if (!wfShapeDb.empty()) {
+      wfRuntime.loadShapeRegistryFromSqlite(wfShapeDb, wfShapeTable);
+      AD_LOG_INFO << "wf: loaded shape registry from " << wfShapeDb
+                  << " (table `" << wfShapeTable << "`)" << std::endl;
+    }
+    if (!wfConversionRules.empty()) {
+      wfRuntime.loadConversionRegistryFromJson(wfConversionRules);
+      AD_LOG_INFO << "wf: loaded conversion rules from " << wfConversionRules
+                  << std::endl;
+    }
+    if (!wfFetchUrl.empty()) {
+      wfRuntime.setWfFetchUrl(wfFetchUrl);
+      AD_LOG_INFO << "wf: shape rewrite will dispatch to " << wfFetchUrl
+                  << std::endl;
+    }
+  } catch (const std::exception& e) {
+    AD_LOG_ERROR << "wf: configuration failed: " << e.what() << std::endl;
+    return 1;
+  }
 
   try {
     Server server(port, numSimultaneousQueries, std::move(accessToken), config,

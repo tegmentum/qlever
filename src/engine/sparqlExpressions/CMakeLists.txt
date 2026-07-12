@@ -45,7 +45,12 @@ if (QLEVER_ENABLE_WF)
             "QLEVER_WF_RUNTIME_LIB to be set (path to header dir and static "
             "archive of the qlever-wf-runtime crate).")
     endif()
-    target_compile_definitions(sparqlExpressions PRIVATE QLEVER_ENABLE_WF=1)
+    # PUBLIC: the definition also propagates to every downstream target that
+    # links sparqlExpressions (parser, engine, qlever-server, ...). Necessary
+    # because WfRuntime::isEnabled() is a constexpr inline in the header —
+    # its value is baked into every translation unit that includes the
+    # header, and the SparqlParser rewrite hook keys off it.
+    target_compile_definitions(sparqlExpressions PUBLIC QLEVER_ENABLE_WF=1)
     target_include_directories(sparqlExpressions PRIVATE
         ${QLEVER_WF_RUNTIME_INCLUDE_DIR})
     # Static archive: wasmtime + cranelift + rustls are compiled in

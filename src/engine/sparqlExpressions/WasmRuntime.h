@@ -68,6 +68,22 @@ class WfRuntime {
   // IRI uses the `wf-invoke:` scheme.
   std::string invokeById(std::string_view idHex);
 
+  // Configuration loaders. Each populates one of the four rewrite-state
+  // registries so the corresponding rewrite pass stops being a cheap
+  // identity. Intended to be called once during server boot before
+  // `Server::run()` starts serving queries.
+  //
+  // Each throws std::runtime_error on any failure — a bad db path,
+  // malformed JSON, or a build compiled without QLEVER_ENABLE_WF. The
+  // server main is expected to catch and exit non-zero rather than boot
+  // with a half-configured runtime.
+  void loadAliasMapFromSqlite(std::string_view dbPath,
+                              std::string_view table);
+  void loadShapeRegistryFromSqlite(std::string_view dbPath,
+                                   std::string_view table);
+  void loadConversionRegistryFromJson(std::string_view jsonPath);
+  void setWfFetchUrl(std::string_view url);
+
   WfRuntime(const WfRuntime&) = delete;
   WfRuntime& operator=(const WfRuntime&) = delete;
 
