@@ -607,6 +607,19 @@ struct WfRuntime::Impl {
     }
   }
 
+  void loadDocumentRegistry(const std::string& jsonPath) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_document_registry_from_json(
+        handle_, jsonPath.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-document-registry failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
   void setFetchUrl(const std::string& url) {
     char* err = nullptr;
     const unsigned int rc =
@@ -663,6 +676,10 @@ void WfRuntime::loadConversionRegistryFromJson(std::string_view jsonPath) {
 
 void WfRuntime::loadFulltextRegistryFromJson(std::string_view jsonPath) {
   impl_->loadFulltextRegistry(std::string{jsonPath});
+}
+
+void WfRuntime::loadDocumentRegistryFromJson(std::string_view jsonPath) {
+  impl_->loadDocumentRegistry(std::string{jsonPath});
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view url) {
@@ -724,6 +741,10 @@ void WfRuntime::loadConversionRegistryFromJson(std::string_view) {
 
 void WfRuntime::loadFulltextRegistryFromJson(std::string_view) {
   wfDisabledThrow("wf-fulltext-config");
+}
+
+void WfRuntime::loadDocumentRegistryFromJson(std::string_view) {
+  wfDisabledThrow("wf-document-config");
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view) {

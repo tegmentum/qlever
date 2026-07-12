@@ -88,6 +88,17 @@ class WfRuntime {
   // Consumed by the (not-yet-ported) filter-fold rewrite pass; safe to
   // leave unset when no fulltext parity cases are configured.
   void loadFulltextRegistryFromJson(std::string_view jsonPath);
+  // Populate the runtime's document-store registry from a JSON file.
+  // Expected shape mirrors the sibling oxigraph-wf document_registry:
+  // top-level `{ "documents": [...] }` with per-entry
+  // name/mode/guest_url/search_backend/storage_backend and the managed-
+  // mode sweep_interval_secs/revision_retention pair. Consumed by
+  // explicit `SERVICE ?svc` dispatch (no filter-fold — wf_document
+  // reuses wf_fulltext's, see wf-document.md §11) and the periodic
+  // Manticore mirror sweep. Safe to leave unset when no wf_document
+  // parity cases are configured. v0.2 companion to
+  // `loadFulltextRegistryFromJson`.
+  void loadDocumentRegistryFromJson(std::string_view jsonPath);
   void setWfFetchUrl(std::string_view url);
 
   WfRuntime(const WfRuntime&) = delete;

@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
   std::string wfShapeTable = "shapes";
   std::string wfConversionRules;
   std::string wfFulltextConfig;
+  std::string wfDocumentConfig;
   std::string wfFetchUrl;
 
   ad_utility::ParameterToProgramOptionFactory optionFactory{
@@ -254,6 +255,18 @@ int main(int argc, char** argv) {
       "\"sweep_interval_secs\":..}, ...]}`. Populates the runtime's fulltext "
       "registry at boot so the filter-fold rewrite (when landed) and the "
       "wf-conformance fulltext parity cases can discover their backends.");
+  add("wf-document-config",
+      po::value<std::string>(&wfDocumentConfig)->default_value(""),
+      "Path to a JSON file of registered document stores (wf_document v0.2). "
+      "Format: `{\"documents\":[{\"name\":..,\"mode\":\"managed\"|\"federated\","
+      "\"guest_url\":..,\"search_backend\":..,\"storage_backend\":..,"
+      "\"search_index\":..,\"sirix_database\":..,\"sirix_resource\":..,"
+      "\"sweep_interval_secs\":..,\"revision_retention\":\"latest\"|\"all\"}, "
+      "...]}`. Managed-mode requires revision_retention; federated-mode must "
+      "not declare sweep_interval_secs or revision_retention. Populates the "
+      "runtime's document registry at boot so wf_document SERVICE dispatch "
+      "and the periodic Manticore mirror sweep discover their backends. "
+      "wf_document reuses wf_fulltext's filter-fold; no new rewrite pass.");
   add("wf-fetch-url", po::value<std::string>(&wfFetchUrl)->default_value(""),
       "URL of the wf_fetch wasm module used by the shape rewrite pass. "
       "Empty (the default) disables shape rewriting even when "
@@ -314,6 +327,11 @@ int main(int argc, char** argv) {
     if (!wfFulltextConfig.empty()) {
       wfRuntime.loadFulltextRegistryFromJson(wfFulltextConfig);
       AD_LOG_INFO << "wf: loaded fulltext registry from " << wfFulltextConfig
+                  << std::endl;
+    }
+    if (!wfDocumentConfig.empty()) {
+      wfRuntime.loadDocumentRegistryFromJson(wfDocumentConfig);
+      AD_LOG_INFO << "wf: loaded document registry from " << wfDocumentConfig
                   << std::endl;
     }
     if (!wfFetchUrl.empty()) {
