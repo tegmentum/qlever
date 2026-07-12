@@ -133,7 +133,7 @@ TEST(TripleComponent, toRdfLiteral) {
 
   TripleComponent object{42};
   ASSERT_EQ(object.toRdfLiteral(),
-            R"("42"^^<http://www.w3.org/2001/XMLSchema#int>)");
+            R"("42"^^<http://www.w3.org/2001/XMLSchema#integer>)");
 
   object = -43.3;
   ASSERT_EQ(object.toRdfLiteral(),

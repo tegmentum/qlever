@@ -1104,7 +1104,7 @@ TEST(SparqlExpression, strIriDtTagged) {
       IdOrLocalVocabEntryVec{
           iriref("<http://www.w3.org/2001/XMLSchema#integer>"),
           iriref("<http://www.w3.org/2001/XMLSchema#integer>"),
-          iriref("<http://www.w3.org/2001/XMLSchema#int>"),
+          iriref("<http://www.w3.org/2001/XMLSchema#integer>"),
           iriref("<http://www.w3.org/2001/XMLSchema#boolean>"),
           iriref("<http://www.w3.org/2001/XMLSchema#boolean>"),
           iriref("<http://www.w3.org/2001/XMLSchema#double>"),
@@ -1348,18 +1348,18 @@ TEST(SparqlExpression, DatatypeExpression) {
   checkGetDatatype(IdOrLocalVocabEntryVec{GeoId1},
                    IdOrLocalVocabEntryVec{iriref(
                        "<http://www.opengis.net/ont/geosparql#wktLiteral>")});
-  checkGetDatatype(
-      IdOrLocalVocabEntryVec{Id::makeFromInt(212378233)},
-      IdOrLocalVocabEntryVec{iriref("<http://www.w3.org/2001/XMLSchema#int>")});
+  checkGetDatatype(IdOrLocalVocabEntryVec{Id::makeFromInt(212378233)},
+                   IdOrLocalVocabEntryVec{iriref(
+                       "<http://www.w3.org/2001/XMLSchema#integer>")});
   checkGetDatatype(IdOrLocalVocabEntryVec{Id::makeFromDouble(2.3475)},
                    IdOrLocalVocabEntryVec{
                        iriref("<http://www.w3.org/2001/XMLSchema#double>")});
   checkGetDatatype(IdOrLocalVocabEntryVec{Id::makeFromBool(false)},
                    IdOrLocalVocabEntryVec{
                        iriref("<http://www.w3.org/2001/XMLSchema#boolean>")});
-  checkGetDatatype(
-      IdOrLocalVocabEntryVec{Id::makeFromInt(true)},
-      IdOrLocalVocabEntryVec{iriref("<http://www.w3.org/2001/XMLSchema#int>")});
+  checkGetDatatype(IdOrLocalVocabEntryVec{Id::makeFromInt(true)},
+                   IdOrLocalVocabEntryVec{iriref(
+                       "<http://www.w3.org/2001/XMLSchema#integer>")});
   checkGetDatatype(IdOrLocalVocabEntryVec{lit("")},
                    IdOrLocalVocabEntryVec{
                        iriref("<http://www.w3.org/2001/XMLSchema#string>")});

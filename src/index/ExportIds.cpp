@@ -252,7 +252,14 @@ idToStringAndTypeForEncodedValue(Id id) {
     case Bool:
       return std::pair{std::string{id.getBoolLiteral()}, XSD_BOOLEAN_TYPE};
     case Int:
-      return std::pair{std::to_string(id.getInt()), XSD_INT_TYPE};
+      // The internal `Datatype::Int` conflates all XSD integer subtypes
+      // (`xsd:int`, `xsd:integer`, `xsd:long`, `xsd:short`, ...); see
+      // `TurtleParser::integerDatatypes_` in `parser/RdfParser.h`. On the
+      // wire we emit `xsd:integer` — the parent type in XSD's integer
+      // hierarchy and the datatype the Turtle/SPARQL specs assign to plain
+      // integer literals such as `165`. This matches Oxigraph, Jena, and
+      // RDF4J and fixes cross-engine parity for pass-through queries.
+      return std::pair{std::to_string(id.getInt()), XSD_INTEGER_TYPE};
     case Date:
       return id.getDate().toStringAndType();
     case GeoPoint:

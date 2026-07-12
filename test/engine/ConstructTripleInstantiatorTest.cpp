@@ -345,9 +345,13 @@ TEST(FormatTerm, dataTypeNull) {
 }
 
 // _____________________________________________________________________________
-TEST(FormatTerm, XSD_INT_TYPE) {
-  testTermFormatting("1", XSD_INT_TYPE,
-                     "\"1\"^^<http://www.w3.org/2001/XMLSchema#int>", "1");
+TEST(FormatTerm, XSD_INTEGER_TYPE) {
+  // `Datatype::Int` is exported as `xsd:integer` (see
+  // `idToStringAndTypeForEncodedValue`); `formatTerm` recognises that
+  // constant when deciding whether to omit the datatype suffix for
+  // CSV/TSV output.
+  testTermFormatting("1", XSD_INTEGER_TYPE,
+                     "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>", "1");
 }
 
 // _____________________________________________________________________________
