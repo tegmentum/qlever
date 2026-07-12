@@ -19,9 +19,30 @@
 
 namespace sparqlExpression::wf {
 
+// Result of a rewrite pass. `aliasesJson` may be empty when the runtime
+// has no active alias registrations; callers must treat empty as "no
+// aliases" rather than an error.
+struct RewriteResult {
+  std::string rewritten;
+  std::string aliasesJson;
+};
+
 class WfRuntime {
  public:
   static WfRuntime& instance();
+
+  // Compile-time knob: `true` iff QLEVER_ENABLE_WF was defined at build
+  // time. Callers that must degrade gracefully (the SparqlParser preprocess
+  // hook, the SERVICE dispatch's `wf-invoke:` branch) key off this so a
+  // build without the Rust runtime linked in still parses queries
+  // untouched.
+  static constexpr bool isEnabled() {
+#ifdef QLEVER_ENABLE_WF
+    return true;
+#else
+    return false;
+#endif
+  }
 
   // Invoke `evaluate` on the module at `wasmUrl`, passing `jsonPayload`
   // (UTF-8, will be NUL-terminated on the guest side) as the input.
@@ -30,6 +51,22 @@ class WfRuntime {
   // Throws std::runtime_error on any transport or wasm-side failure.
   std::string callEvaluate(std::string_view wasmUrl,
                            std::string_view jsonPayload);
+
+  // Run the runtime's rewrite passes over the raw SPARQL text. Returns
+  // the rewritten SPARQL and (optionally) a JSON `{canonical: alias, ...}`
+  // reverse map for output-path re-aliasing. Throws on runtime failure.
+  //
+  // When QLEVER_ENABLE_WF is off this returns `{query, ""}` unchanged.
+  RewriteResult rewriteQuery(std::string_view query);
+
+  // Invoke a `wf:partial(...)` that the rewrite pass previously folded
+  // into a `wf-invoke:<id>` SERVICE IRI. `idHex` is the hex substring
+  // after `wf-invoke:`. Returns the guest's binding-sets JSON. Throws
+  // on runtime failure.
+  //
+  // Called from Service::computeResultImpl when the resolved SERVICE
+  // IRI uses the `wf-invoke:` scheme.
+  std::string invokeById(std::string_view idHex);
 
   WfRuntime(const WfRuntime&) = delete;
   WfRuntime& operator=(const WfRuntime&) = delete;

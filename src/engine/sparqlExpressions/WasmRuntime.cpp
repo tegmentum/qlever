@@ -509,6 +509,48 @@ struct WfRuntime::Impl {
     ::wf_runtime_free_string(out);
     return result;
   }
+
+  // See WasmRuntime.h for the semantics; this is the FFI shim over
+  // wf_runtime_rewrite_query. The Rust runtime owns the returned buffers.
+  RewriteResult rewriteQuery(const std::string& query) {
+    char* err = nullptr;
+    char* aliases = nullptr;
+    const char* out = ::wf_runtime_rewrite_query(handle_, query.c_str(),
+                                                 &aliases, &err);
+    if (!out) {
+      std::string msg = err ? std::string("wf:rewrite: ") + err
+                            : std::string("wf:rewrite: unknown error");
+      if (err) ::wf_runtime_free_string(err);
+      // The rewrite ABI documents `aliases_json_out` as always NULL on
+      // failure, but harden against a future runtime that violates the
+      // contract by freeing anyway.
+      if (aliases) ::wf_runtime_free_string(aliases);
+      throw std::runtime_error(msg);
+    }
+    RewriteResult res;
+    res.rewritten = std::string{out};
+    ::wf_runtime_free_string(out);
+    if (aliases) {
+      res.aliasesJson = std::string{aliases};
+      ::wf_runtime_free_string(aliases);
+    }
+    return res;
+  }
+
+  std::string invokeById(const std::string& idHex) {
+    char* err = nullptr;
+    const char* out =
+        ::wf_runtime_invoke_by_id(handle_, idHex.c_str(), &err);
+    if (!out) {
+      std::string msg = err ? std::string("wf-invoke: ") + err
+                            : std::string("wf-invoke: unknown error");
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+    std::string result{out};
+    ::wf_runtime_free_string(out);
+    return result;
+  }
 };
 
 WfRuntime::WfRuntime() : impl_(new Impl()) {}
@@ -529,6 +571,14 @@ std::string WfRuntime::callEvaluate(std::string_view wasmUrl,
   return impl_->invoke(std::string(wasmUrl), args_json);
 }
 
+RewriteResult WfRuntime::rewriteQuery(std::string_view query) {
+  return impl_->rewriteQuery(std::string{query});
+}
+
+std::string WfRuntime::invokeById(std::string_view idHex) {
+  return impl_->invokeById(std::string{idHex});
+}
+
 #else  // !QLEVER_ENABLE_WF
 
 struct WfRuntime::Impl {};
@@ -544,6 +594,21 @@ std::string WfRuntime::callEvaluate(std::string_view, std::string_view) {
   throw std::runtime_error(
       "wf:call: this QLever build was compiled without QLEVER_ENABLE_WF; "
       "rebuild with -DQLEVER_ENABLE_WF=ON to enable wasm execution.");
+}
+
+RewriteResult WfRuntime::rewriteQuery(std::string_view query) {
+  // Passthrough when the runtime is compiled out — hand the query text
+  // back unchanged so the parser sees it exactly as the client sent it,
+  // and hand back an empty alias map so the caller has nothing to
+  // canonicalise on the output path. This mirrors how the caller would
+  // behave if the runtime were linked in but had no active aliases.
+  return RewriteResult{std::string{query}, std::string{}};
+}
+
+std::string WfRuntime::invokeById(std::string_view) {
+  throw std::runtime_error(
+      "wf-invoke: this QLever build was compiled without QLEVER_ENABLE_WF; "
+      "SERVICE <wf-invoke:...> cannot be evaluated.");
 }
 
 #endif
