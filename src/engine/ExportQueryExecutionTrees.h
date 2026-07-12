@@ -20,6 +20,7 @@
 #include "engine/QueryExportTypes.h"
 #include "parser/data/LimitOffsetClause.h"
 #include "util/CancellationHandle.h"
+#include "util/HashMap.h"
 #include "util/http/MediaTypes.h"
 #include "util/stream_generator.h"
 
@@ -95,14 +96,16 @@ class ExportQueryExecutionTrees {
       CancellationHandle cancellationHandle, STREAMABLE_YIELDER_ARG_DECL);
 
   // Generate the bindings of the result of a SELECT query in the
-  // `application/ qlever+json` format.
+  // `application/ qlever+json` format. `wfAliases`, when non-empty,
+  // rewrites canonical IRIs back to their alias form on the way out.
   static ad_utility::InputRangeTypeErased<std::string>
   selectQueryResultBindingsToQLeverJSON(
       const QueryExecutionTree& qet,
       const parsedQuery::SelectClause& selectClause,
       const LimitOffsetClause& limitAndOffset,
       std::shared_ptr<const Result> result, uint64_t& resultSize,
-      CancellationHandle cancellationHandle);
+      CancellationHandle cancellationHandle,
+      ad_utility::HashMap<std::string, std::string> wfAliases = {});
 
   // Generate the bindings of the result of a CONSTRUCT query in the
   // `application/ qlever+json` format.
@@ -115,12 +118,15 @@ class ExportQueryExecutionTrees {
       CancellationHandle cancellationHandle);
 
   // Helper function that generates the individual bindings for the
-  // `application/ qlever+json` format.
+  // `application/ qlever+json` format. `wfAliases`, when non-empty,
+  // rewrites canonical IRIs back to their alias form on the way out — see
+  // `ParsedQuery::wfAliasesJson_` for rationale.
   static auto idTableToQLeverJSONBindings(
       const QueryExecutionTree& qet, LimitOffsetClause limitAndOffset,
       const QueryExecutionTree::ColumnIndicesAndTypes columns,
       std::shared_ptr<const Result> result, uint64_t& resultSize,
-      CancellationHandle cancellationHandle);
+      CancellationHandle cancellationHandle,
+      ad_utility::HashMap<std::string, std::string> wfAliases = {});
 
   // Helper function that generates the result of a CONSTRUCT query as
   // `StringTriple`s.
@@ -140,12 +146,16 @@ class ExportQueryExecutionTrees {
       CancellationHandle cancellationHandle, STREAMABLE_YIELDER_ARG_DECL);
 
   // Generate the result of a SELECT query as a CSV or TSV or binary stream.
+  // `wfAliases`, when non-empty, rewrites canonical IRIs back to their
+  // alias form on the way out.
   template <MediaType format>
   static STREAMABLE_GENERATOR_TYPE selectQueryResultToStream(
       const QueryExecutionTree& qet,
       const parsedQuery::SelectClause& selectClause,
       LimitOffsetClause limitAndOffset, CancellationHandle cancellationHandle,
-      const ad_utility::Timer& requestTimer, STREAMABLE_YIELDER_ARG_DECL);
+      const ad_utility::Timer& requestTimer,
+      ad_utility::HashMap<std::string, std::string> wfAliases,
+      STREAMABLE_YIELDER_ARG_DECL);
 
   // Yield all `IdTables` provided by the given `result`.
   static ad_utility::InputRangeTypeErased<TableConstRefWithVocab> getIdTables(

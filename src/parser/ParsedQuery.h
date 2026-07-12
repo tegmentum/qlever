@@ -80,6 +80,16 @@ class ParsedQuery {
   std::string _originalString;
   std::optional<parsedQuery::Values> postQueryValuesClause_ = std::nullopt;
 
+  // Reverse alias map (canonical IRI -> client-supplied alias IRI) captured
+  // by the qlever-wf-runtime rewrite pass at parse time. Serialisers consult
+  // this when writing IRI-typed cells so a client that queried using an
+  // alias sees the alias in the results rather than the runtime-canonical
+  // form. Empty string means "no aliases" — either the wf runtime is
+  // disabled at build time, or the query mentioned no aliased IRIs. The
+  // string is stored as raw JSON (`{"canonical": "alias", ...}`); each
+  // serialiser parses it lazily.
+  std::string wfAliasesJson_;
+
   // Contains warnings about queries that are valid according to the SPARQL
   // standard, but are probably semantically wrong.
   std::vector<std::string> warnings_;
