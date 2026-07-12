@@ -29,6 +29,7 @@
 #include "index/IndexImpl.h"
 #include "rdfTypes/RdfEscaping.h"
 #include "util/ConstexprUtils.h"
+#include "util/HashMap.h"
 #include "util/ValueIdentity.h"
 #include "util/http/MediaTypes.h"
 #include "util/json.h"
@@ -40,6 +41,64 @@ namespace {
 
 using LiteralOrIri = ad_utility::triple_component::LiteralOrIri;
 using Literal = ad_utility::triple_component::Literal;
+
+// Canonical -> alias reverse map for the wf runtime's IRI aliases. See
+// `ParsedQuery::wfAliasesJson_` for the source of the data and the
+// motivating rationale.
+using WfAliasMap = ad_utility::HashMap<std::string, std::string>;
+
+// Parse the JSON string on `ParsedQuery::wfAliasesJson_` into a lookup
+// table. Empty input yields an empty map. Malformed JSON is treated as
+// "no aliases" (rather than throwing) — the alternative would fail the
+// entire query on the output path over a runtime-produced payload, which
+// is worse than emitting canonical IRIs unchanged.
+WfAliasMap parseWfAliasMap(std::string_view aliasesJson) {
+  WfAliasMap map;
+  if (aliasesJson.empty()) {
+    return map;
+  }
+  try {
+    auto j = nlohmann::json::parse(aliasesJson);
+    if (!j.is_object()) {
+      return map;
+    }
+    for (auto& [k, v] : j.items()) {
+      if (v.is_string()) {
+        map.emplace(k, v.get<std::string>());
+      }
+    }
+  } catch (const nlohmann::json::exception&) {
+    // Fall through with whatever we accumulated (probably nothing).
+  }
+  return map;
+}
+
+// If `s` is an IRI-typed cell (either the angle-bracketed `<iri>` form
+// used by TSV/JSON/XML or the bare `iri` form used by CSV), rewrite it
+// through the canonical->alias map. Non-matches pass through unchanged.
+// Literals, blank nodes, and numeric cells never satisfy either shape
+// once combined with a map lookup miss, so they are untouched.
+void applyWfAliasIfIri(std::string& s, const WfAliasMap& aliases) {
+  if (aliases.empty() || s.empty()) {
+    return;
+  }
+  if (s.size() >= 2 && s.front() == '<' && s.back() == '>') {
+    std::string canonical = s.substr(1, s.size() - 2);
+    auto it = aliases.find(canonical);
+    if (it != aliases.end()) {
+      s = absl::StrCat("<", it->second, ">");
+    }
+    return;
+  }
+  // CSV-style bare IRI (no angle brackets): only rewrite on an exact map
+  // hit. Literals theoretically could collide with a canonical IRI's
+  // text form here — accepted as a corner case; the alternative is
+  // carrying type info through every serialiser call site.
+  auto it = aliases.find(s);
+  if (it != aliases.end()) {
+    s = it->second;
+  }
+}
 
 // _____________________________________________________________________________
 // Return true iff the `result` is nonempty.
@@ -308,7 +367,7 @@ nlohmann::json idTableToQLeverJSONRow(
     const QueryExecutionTree& qet,
     const QueryExecutionTree::ColumnIndicesAndTypes& columns,
     const LocalVocab& localVocab, const size_t rowIndex,
-    const IdTableView<0>& data) {
+    const IdTableView<0>& data, const WfAliasMap& wfAliases) {
   // We need the explicit `array` constructor for the special case of zero
   // variables.
   auto row = nlohmann::json::array();
@@ -318,16 +377,19 @@ nlohmann::json idTableToQLeverJSONRow(
       continue;
     }
     const auto& currentId = data(rowIndex, opt->columnIndex_);
-    const auto& optionalStringAndXsdType = ql::exportIds::idToStringAndType(
+    auto optionalStringAndXsdType = ql::exportIds::idToStringAndType(
         qet.getQec()->getIndex(), currentId, localVocab);
     if (!optionalStringAndXsdType.has_value()) {
       row.emplace_back(nullptr);
       continue;
     }
-    const auto& [stringValue, xsdType] = optionalStringAndXsdType.value();
+    auto& [stringValue, xsdType] = optionalStringAndXsdType.value();
     if (xsdType) {
       row.emplace_back('"' + stringValue + "\"^^<" + xsdType + '>');
     } else {
+      // Only IRI-typed cells get relabelled; the helper is a no-op
+      // for literals, blank nodes, and numeric cells that miss the map.
+      applyWfAliasIfIri(stringValue, wfAliases);
       row.emplace_back(stringValue);
     }
   }
@@ -339,15 +401,16 @@ auto ExportQueryExecutionTrees::idTableToQLeverJSONBindings(
     const QueryExecutionTree& qet, LimitOffsetClause limitAndOffset,
     QueryExecutionTree::ColumnIndicesAndTypes columns,
     std::shared_ptr<const Result> result, uint64_t& resultSize,
-    CancellationHandle cancellationHandle) {
+    CancellationHandle cancellationHandle, WfAliasMap wfAliases) {
   AD_CORRECTNESS_CHECK(result != nullptr);
 
   auto rowIndicies = getRowIndices(limitAndOffset, *result, resultSize);
   return ad_utility::OwningView(std::move(rowIndicies)) |
          ql::views::transform(
              [&qet, columns = std::move(columns), result = std::move(result),
-              cancellationHandle =
-                  std::move(cancellationHandle)](const auto& tableWithView) {
+              cancellationHandle = std::move(cancellationHandle),
+              wfAliases =
+                  std::move(wfAliases)](const auto& tableWithView) mutable {
                return ql::ranges::transform_view(
                    tableWithView.view_, [&](uint64_t rowIndex) {
                      cancellationHandle->throwIfCancelled();
@@ -355,7 +418,7 @@ auto ExportQueryExecutionTrees::idTableToQLeverJSONBindings(
                          tableWithView.tableWithVocab_;
                      return idTableToQLeverJSONRow(
                                 qet, columns, tableWithVocab.localVocab(),
-                                rowIndex, tableWithVocab.idTable())
+                                rowIndex, tableWithVocab.idTable(), wfAliases)
                          .dump();
                    });
              }) |
@@ -435,7 +498,7 @@ ExportQueryExecutionTrees::selectQueryResultBindingsToQLeverJSON(
     const parsedQuery::SelectClause& selectClause,
     const LimitOffsetClause& limitAndOffset,
     std::shared_ptr<const Result> result, uint64_t& resultSize,
-    CancellationHandle cancellationHandle) {
+    CancellationHandle cancellationHandle, WfAliasMap wfAliases) {
   AD_CORRECTNESS_CHECK(result != nullptr);
   AD_LOG_DEBUG << "Resolving strings for finished binary result...\n";
   QueryExecutionTree::ColumnIndicesAndTypes selectedColumnIndices =
@@ -443,7 +506,7 @@ ExportQueryExecutionTrees::selectQueryResultBindingsToQLeverJSON(
 
   return InputRangeTypeErased(idTableToQLeverJSONBindings(
       qet, limitAndOffset, std::move(selectedColumnIndices), std::move(result),
-      resultSize, std::move(cancellationHandle)));
+      resultSize, std::move(cancellationHandle), std::move(wfAliases)));
 }
 
 // _____________________________________________________________________________
@@ -453,6 +516,7 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream(
     const parsedQuery::SelectClause& selectClause,
     LimitOffsetClause limitAndOffset, CancellationHandle cancellationHandle,
     [[maybe_unused]] const ad_utility::Timer& requestTimer,
+    [[maybe_unused]] WfAliasMap wfAliases,
     [[maybe_unused]] STREAMABLE_YIELDER_TYPE streamableYielder) {
   using enum ad_utility::MediaType;
   static constexpr std::array supportedFormats{octetStream, csv, tsv, turtle,
@@ -520,7 +584,11 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream(
                   qet.getQec()->getIndex(), id, pair.localVocab(),
                   escapeFunction);
           if (optionalStringAndType.has_value()) [[likely]] {
-            STREAMABLE_YIELD(optionalStringAndType.value().first);
+            auto& stringValue = optionalStringAndType.value().first;
+            // Only IRI-typed cells get relabelled; the helper is a
+            // no-op for cells that miss the map.
+            applyWfAliasIfIri(stringValue, wfAliases);
+            STREAMABLE_YIELD(stringValue);
           }
         }
         if (j + 1 < selectedColumnIndices.size()) {
@@ -539,13 +607,20 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream(
 template <typename IndexType, typename LocalVocabType>
 static std::string idToXMLBinding(std::string_view variable, Id id,
                                   const IndexType& index,
-                                  const LocalVocabType& localVocab) {
+                                  const LocalVocabType& localVocab,
+                                  const WfAliasMap& wfAliases) {
   using namespace std::string_view_literals;
   using namespace std::string_literals;
-  const auto& optionalValue =
-      ql::exportIds::idToStringAndType(index, id, localVocab);
+  auto optionalValue = ql::exportIds::idToStringAndType(index, id, localVocab);
   if (!optionalValue.has_value()) {
     return ""s;
+  }
+  // Rewrite the IRI cell (if any) through the alias map before the
+  // XML strToBinding lambda picks apart the <...> form. Only IRIs
+  // shaped as `<canonical>` are affected; literals with datatype IRIs
+  // deliberately go unchanged.
+  if (!optionalValue.value().second) {
+    applyWfAliasIfIri(optionalValue.value().first, wfAliases);
   }
   const auto& [stringValue, xsdType] = optionalValue.value();
   std::string result = absl::StrCat("\n    <binding name=\"", variable, "\">");
@@ -615,6 +690,7 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream<
     const parsedQuery::SelectClause& selectClause,
     LimitOffsetClause limitAndOffset, CancellationHandle cancellationHandle,
     [[maybe_unused]] const ad_utility::Timer& requestTimer,
+    WfAliasMap wfAliases,
     [[maybe_unused]] STREAMABLE_YIELDER_TYPE streamableYielder) {
   using namespace std::string_view_literals;
   STREAMABLE_YIELD(
@@ -651,8 +727,9 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream<
         if (selectedColIdx.has_value()) {
           const auto& val = selectedColIdx.value();
           Id id = pair.idTable()(i, val.columnIndex_);
-          STREAMABLE_YIELD(idToXMLBinding(
-              val.variable_, id, qet.getQec()->getIndex(), pair.localVocab()));
+          STREAMABLE_YIELD(idToXMLBinding(val.variable_, id,
+                                          qet.getQec()->getIndex(),
+                                          pair.localVocab(), wfAliases));
         }
       }
       STREAMABLE_YIELD("\n  </result>");
@@ -670,7 +747,7 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream<
     const QueryExecutionTree& qet,
     const parsedQuery::SelectClause& selectClause,
     LimitOffsetClause limitAndOffset, CancellationHandle cancellationHandle,
-    const ad_utility::Timer& requestTimer,
+    const ad_utility::Timer& requestTimer, WfAliasMap wfAliases,
     [[maybe_unused]] STREAMABLE_YIELDER_TYPE streamableYielder) {
   // This call triggers the possibly expensive computation of the query result
   // unless the result is already cached.
@@ -697,7 +774,13 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream<
           qet.getQec()->getIndex(), pair.idTable()(i, column->columnIndex_),
           pair.localVocab());
       if (optionalStringAndType.has_value()) [[likely]] {
-        const auto& [stringValue, xsdType] = optionalStringAndType.value();
+        auto& [stringValue, xsdType] = optionalStringAndType.value();
+        // IRI-typed cells only: `xsdType` is nullptr for IRIs, blank
+        // nodes, and plain literals; the helper is shape-guarded so
+        // it's a no-op for the non-IRI shapes.
+        if (!xsdType) {
+          applyWfAliasIfIri(stringValue, wfAliases);
+        }
         binding[column->variable_] =
             stringAndTypeToBinding(stringValue, xsdType);
       }
@@ -747,6 +830,7 @@ STREAMABLE_GENERATOR_TYPE ExportQueryExecutionTrees::selectQueryResultToStream<
     [[maybe_unused]] LimitOffsetClause limitAndOffset,
     [[maybe_unused]] CancellationHandle cancellationHandle,
     [[maybe_unused]] const ad_utility::Timer& requestTimer,
+    [[maybe_unused]] WfAliasMap wfAliases,
     [[maybe_unused]] STREAMABLE_YIELDER_TYPE streamableYielder) {
   throw std::runtime_error(
       "The binary export of QLever results is not yet implemented, please have "
@@ -860,6 +944,15 @@ ExportQueryExecutionTrees::computeResult(
     [[maybe_unused]] STREAMABLE_YIELDER_TYPE streamableYielder) {
   auto limit = parsedQuery._limitOffset;
   compensateForLimitOffsetClause(limit, qet);
+  // Parse the wf alias map once for the whole result; an empty map is
+  // returned when no wf runtime was involved with this parse, and it's
+  // cheap enough to always construct.
+  //
+  // NOTE: CONSTRUCT results currently go through
+  // `ConstructTripleGenerator` and do not consult the alias map. Alias
+  // rewriting for CONSTRUCT is deliberately deferred; the typical wf
+  // integration surfaces aliased IRIs via SELECT / ASK / QLever JSON.
+  WfAliasMap wfAliases = parseWfAliasMap(parsedQuery.wfAliasesJson_);
   auto compute = ad_utility::ApplyAsValueIdentity{[&](auto format) {
     if constexpr (format == MediaType::qleverJson) {
       return computeResultAsQLeverJSON(parsedQuery, qet, limit, requestTimer,
@@ -874,7 +967,7 @@ ExportQueryExecutionTrees::computeResult(
                  ? selectQueryResultToStream<format>(
                        qet, parsedQuery.selectClause(), limit,
                        std::move(cancellationHandle), requestTimer,
-                       streamableYielder)
+                       std::move(wfAliases), streamableYielder)
                  : constructQueryResultToStream<format>(
                        qet, parsedQuery.constructClause().triples_, limit,
                        qet.getResult(true), std::move(cancellationHandle),
@@ -941,11 +1034,14 @@ ExportQueryExecutionTrees::computeResultAsQLeverJSON(
 
   // Yield the bindings and compute the result size.
   uint64_t resultSize = 0;
+  // Only the SELECT branch consumes wf aliases; ASK and CONSTRUCT do
+  // not (see the note in `computeResult`).
+  WfAliasMap wfAliases = parseWfAliasMap(query.wfAliasesJson_);
   auto bindings = [&]() {
     if (query.hasSelectClause()) {
       return selectQueryResultBindingsToQLeverJSON(
           qet, query.selectClause(), limitOffset, std::move(result), resultSize,
-          std::move(cancellationHandle));
+          std::move(cancellationHandle), std::move(wfAliases));
     } else if (query.hasConstructClause()) {
       return constructQueryResultBindingsToQLeverJSON(
           qet, query.constructClause().triples_, limitOffset, std::move(result),

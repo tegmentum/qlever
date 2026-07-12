@@ -13,17 +13,6 @@ using BnodeMgr = ad_utility::BlankNodeManager*;
 
 namespace {
 
-// Alias JSON captured by the last query rewrite on this thread.
-// Populated by `applyWfRewrite` on the way into the parser; the eventual
-// consumer (SPARQL results serializer) can peek at it to relabel
-// canonical IRIs back to whatever alias the client wrote. We do not have
-// a clean seam to hand it forward as a parameter, so it lives here as
-// thread_local — a per-request cell that survives from parse to
-// serialise inside a single request thread. If a follow-up wires an
-// explicit session/request context between parse and serialise, this
-// should move there.
-thread_local std::string gLastWfAliasesJson;
-
 // Run the qlever-wf-runtime rewrite passes over the raw SPARQL text.
 // A hard passthrough when QLEVER_ENABLE_WF is off (the runtime facade
 // keeps the same signature so we don't need conditional compilation
@@ -32,29 +21,22 @@ thread_local std::string gLastWfAliasesJson;
 // would produce a comparable error anyway; surfacing the runtime's
 // message first is more actionable because it points at the rewrite
 // pass that broke.
-std::string applyWfRewrite(std::string query) {
+//
+// Returns the rewritten SPARQL text plus the canonical->alias reverse
+// map JSON as a struct so the caller can stash the alias JSON on the
+// resulting `ParsedQuery` for the result serialiser to consume later.
+sparqlExpression::wf::RewriteResult applyWfRewrite(std::string query) {
   if (!sparqlExpression::wf::WfRuntime::isEnabled()) {
     // The runtime facade would return `query` unchanged anyway when
     // QLEVER_ENABLE_WF is off, but skipping the call entirely avoids
     // constructing the runtime singleton on the disabled path.
-    gLastWfAliasesJson.clear();
-    return query;
+    return sparqlExpression::wf::RewriteResult{std::move(query),
+                                               std::string{}};
   }
-  auto res =
-      sparqlExpression::wf::WfRuntime::instance().rewriteQuery(query);
-  gLastWfAliasesJson = std::move(res.aliasesJson);
-  return std::move(res.rewritten);
+  return sparqlExpression::wf::WfRuntime::instance().rewriteQuery(query);
 }
 
 }  // namespace
-
-namespace sparqlExpression::wf {
-// Public accessor for the alias JSON stashed by the last rewrite on
-// this thread. Empty string == no aliases (either the runtime is
-// disabled, or the query mentioned no aliased IRIs). Kept out of
-// WasmRuntime.h because the storage lives in this TU, not the runtime.
-const std::string& lastAliasesJson() { return gLastWfAliasesJson; }
-}  // namespace sparqlExpression::wf
 
 namespace {
 // _____________________________________________________________________________
@@ -99,9 +81,16 @@ ParsedQuery SparqlParser::parseQuery(
   // MaterializedViews.cpp, and GraphStoreProtocol.cpp in a single place.
   // The hook is a hard passthrough when QLEVER_ENABLE_WF is off, and a
   // near-identity pass when the runtime has no registered aliases.
-  query = applyWfRewrite(std::move(query));
+  //
+  // The alias JSON (canonical->alias reverse map) travels with the
+  // parsed query on `wfAliasesJson_` so the result serialiser can relabel
+  // IRI-typed cells back to whatever alias the client wrote. This
+  // supersedes the earlier thread_local staging cell — the alias data
+  // is now request-scoped rather than thread-scoped.
+  auto rewrite = applyWfRewrite(std::move(query));
   auto res = parseOperation(&bnodeMgr, encodedIriManager, &AntlrParser::query,
-                            std::move(query), datasets);
+                            std::move(rewrite.rewritten), datasets);
+  res.wfAliasesJson_ = std::move(rewrite.aliasesJson);
   // Queries never contain blank nodes in the body since they are always turned
   // into internal variables.
   AD_CORRECTNESS_CHECK(bnodeMgr.numBlocksUsed() == 0);
