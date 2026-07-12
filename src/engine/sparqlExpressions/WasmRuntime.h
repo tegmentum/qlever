@@ -82,6 +82,12 @@ class WfRuntime {
   void loadShapeRegistryFromSqlite(std::string_view dbPath,
                                    std::string_view table);
   void loadConversionRegistryFromJson(std::string_view jsonPath);
+  // Populate the runtime's fulltext-index registry from a JSON file.
+  // Expected shape mirrors oxigraph-wf's fulltext_registry: top-level
+  // `{ "indexes": [...] }` with per-entry name/mode/backend_url/opts.
+  // Consumed by the (not-yet-ported) filter-fold rewrite pass; safe to
+  // leave unset when no fulltext parity cases are configured.
+  void loadFulltextRegistryFromJson(std::string_view jsonPath);
   void setWfFetchUrl(std::string_view url);
 
   WfRuntime(const WfRuntime&) = delete;

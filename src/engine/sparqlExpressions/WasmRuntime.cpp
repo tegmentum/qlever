@@ -594,6 +594,19 @@ struct WfRuntime::Impl {
     }
   }
 
+  void loadFulltextRegistry(const std::string& jsonPath) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_fulltext_registry_from_json(
+        handle_, jsonPath.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-fulltext-registry failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
   void setFetchUrl(const std::string& url) {
     char* err = nullptr;
     const unsigned int rc =
@@ -646,6 +659,10 @@ void WfRuntime::loadShapeRegistryFromSqlite(std::string_view dbPath,
 
 void WfRuntime::loadConversionRegistryFromJson(std::string_view jsonPath) {
   impl_->loadConversionRegistry(std::string{jsonPath});
+}
+
+void WfRuntime::loadFulltextRegistryFromJson(std::string_view jsonPath) {
+  impl_->loadFulltextRegistry(std::string{jsonPath});
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view url) {
@@ -703,6 +720,10 @@ void WfRuntime::loadShapeRegistryFromSqlite(std::string_view, std::string_view) 
 
 void WfRuntime::loadConversionRegistryFromJson(std::string_view) {
   wfDisabledThrow("wf-conversion-rules");
+}
+
+void WfRuntime::loadFulltextRegistryFromJson(std::string_view) {
+  wfDisabledThrow("wf-fulltext-config");
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view) {

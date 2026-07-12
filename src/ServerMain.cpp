@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
   std::string wfShapeDb;
   std::string wfShapeTable = "shapes";
   std::string wfConversionRules;
+  std::string wfFulltextConfig;
   std::string wfFetchUrl;
 
   ad_utility::ParameterToProgramOptionFactory optionFactory{
@@ -245,6 +246,14 @@ int main(int argc, char** argv) {
       "\"expression\":..}, ...]}`. Populates the runtime's conversion "
       "registry at boot so `GRAPH <urn:wf:conversion:*>` rewrites take "
       "effect.");
+  add("wf-fulltext-config",
+      po::value<std::string>(&wfFulltextConfig)->default_value(""),
+      "Path to a JSON file of registered fulltext indexes. Format: "
+      "`{\"indexes\":[{\"name\":..,\"mode\":\"literal-index\"|\"document-corpus\","
+      "\"backend_url\":..,\"predicates\":[..],\"opts\":{..},\"languages\":[..],"
+      "\"sweep_interval_secs\":..}, ...]}`. Populates the runtime's fulltext "
+      "registry at boot so the filter-fold rewrite (when landed) and the "
+      "wf-conformance fulltext parity cases can discover their backends.");
   add("wf-fetch-url", po::value<std::string>(&wfFetchUrl)->default_value(""),
       "URL of the wf_fetch wasm module used by the shape rewrite pass. "
       "Empty (the default) disables shape rewriting even when "
@@ -300,6 +309,11 @@ int main(int argc, char** argv) {
     if (!wfConversionRules.empty()) {
       wfRuntime.loadConversionRegistryFromJson(wfConversionRules);
       AD_LOG_INFO << "wf: loaded conversion rules from " << wfConversionRules
+                  << std::endl;
+    }
+    if (!wfFulltextConfig.empty()) {
+      wfRuntime.loadFulltextRegistryFromJson(wfFulltextConfig);
+      AD_LOG_INFO << "wf: loaded fulltext registry from " << wfFulltextConfig
                   << std::endl;
     }
     if (!wfFetchUrl.empty()) {
