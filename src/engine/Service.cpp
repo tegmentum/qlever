@@ -888,15 +888,32 @@ Result Service::wfInvokeBindingsToResult(const std::string& json) {
   for (const auto& row : rowsJson) {
     idTable.emplace_back();
     if (row.is_array()) {
-      // Positional row: index i in the array matches runtimeCols[i]. If
-      // `runtimeCols` is empty (no "vars"/"columns" declared), fall back
-      // to the SERVICE clause's visibleVariables_ order.
-      const auto& order = runtimeCols.empty() ? colNames : runtimeCols;
-      // Build a name→cell map for this row so the outer per-visibleVar
-      // lookup is O(1) regardless of column count.
+      // Two indexing regimes coexist inside "rows":
+      //   * `{name, value}` wrappers — the wf_runtime_invoke wire shape.
+      //     The cell carries its own name, so we key on THAT rather than
+      //     on the parallel `runtimeCols`/`colNames` list. This matches
+      //     the shape rewrite's contract (guest columns are named
+      //     independently of the outer visibleVariables_ ordering) and
+      //     is robust against row length diverging from vars length
+      //     (wf_fetch, e.g., skips absent columns like `_graph`).
+      //   * Bare SPARQL 1.1 Results cells `{type,value,...}` — no name
+      //     inside the cell, so we fall back to positional runtimeCols
+      //     (or colNames if runtimeCols is empty).
       ad_utility::HashMap<std::string, const nlohmann::json*> rowByName;
-      for (size_t i = 0; i < row.size() && i < order.size(); ++i) {
-        rowByName.try_emplace(order[i], &row[i]);
+      bool anyNamedCell = false;
+      for (size_t i = 0; i < row.size(); ++i) {
+        const auto& cell = row[i];
+        if (cell.is_object() && cell.contains("name") && cell["name"].is_string()) {
+          rowByName.try_emplace(cell["name"].get<std::string>(), &cell);
+          anyNamedCell = true;
+        }
+      }
+      if (!anyNamedCell) {
+        // Positional fallback for shape (a) SPARQL 1.1 Results cells.
+        const auto& order = runtimeCols.empty() ? colNames : runtimeCols;
+        for (size_t i = 0; i < row.size() && i < order.size(); ++i) {
+          rowByName.try_emplace(order[i], &row[i]);
+        }
       }
       for (size_t col = 0; col < colNames.size(); ++col) {
         auto it = rowByName.find(colNames[col]);
