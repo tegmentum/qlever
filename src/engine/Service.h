@@ -134,6 +134,23 @@ class Service : public Operation {
   // Actually compute the result for the function above.
   Result computeResultImpl(bool requestLaziness);
 
+  // Handle a `SERVICE <wf-invoke:<id>>` clause: invoke the wf runtime,
+  // parse the returned binding-sets JSON into an IdTable, and hand it
+  // back as a fully-materialised Result. `idHex` is the hex substring
+  // that followed `wf-invoke:` in the resolved IRI. The runtime consumes
+  // the registry entry on lookup, so a second call for the same id will
+  // fail — one plan instantiation, one invocation.
+  Result computeResultFromWfInvoke(std::string idHex);
+
+  // Parse the runtime's binding-sets JSON reply (shape:
+  // `{"columns":[...],"rows":[[{type,value,...}, ...], ...]}` — the
+  // per-cell shape reuses SPARQL 1.1 Results JSON semantics) into an
+  // IdTable using the SERVICE clause's visibleVariables_ as the column
+  // ordering. Cells that are absent from a row become UNDEF. Throws
+  // std::runtime_error on structural failure so a SILENT clause can
+  // downgrade to the neutral element via `computeResult`'s catch.
+  Result wfInvokeBindingsToResult(const std::string& json);
+
   // Get a VALUES clause that contains the values of the siblingTree's result.
   std::optional<std::string> getSiblingValuesClause() const;
 

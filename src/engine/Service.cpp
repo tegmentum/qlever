@@ -9,11 +9,14 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
+#include <functional>
+
 #include "backports/StartsWithAndEndsWith.h"
 #include "engine/CallFixedSize.h"
 #include "engine/ExportQueryExecutionTrees.h"
 #include "engine/Sort.h"
 #include "engine/VariableToColumnMap.h"
+#include "engine/sparqlExpressions/WasmRuntime.h"
 #include "global/RuntimeParameters.h"
 #include "index/ExportIds.h"
 #include "parser/RdfParser.h"
@@ -175,6 +178,24 @@ Result Service::computeResultImpl(bool requestLaziness) {
   // Get the URL of the SPARQL endpoint.
   if (getRuntimeParameter<&RuntimeParameters::syntaxTestMode_>()) {
     return makeNeutralElementResultForSilentFail();
+  }
+
+  // wf-invoke: SERVICE dispatch. The rewrite pass in SparqlParser folds
+  // `SERVICE ?v { ... }` (where ?v was bound to `wf:partial(<wasm>, ...)`)
+  // into `SERVICE <wf-invoke:<hex_id>>` and stashes the wasm URL + args
+  // in a runtime-side registry. When we see the `wf-invoke:` scheme,
+  // route the call to the runtime instead of doing HTTP so a synthetic
+  // IRI never leaks out on the wire. The whitelist check is deliberately
+  // skipped for this scheme — the runtime registry is populated from
+  // trusted rewrite input, not from user-supplied IRIs.
+  {
+    const auto iriContent =
+        asStringViewUnsafe(parsedServiceClause_.serviceIri_.getContent());
+    constexpr std::string_view kWfInvokePrefix = "wf-invoke:";
+    if (ql::starts_with(iriContent, kWfInvokePrefix)) {
+      return computeResultFromWfInvoke(
+          std::string{iriContent.substr(kWfInvokePrefix.size())});
+    }
   }
 
   throwIfIriNotWhitelisted();
@@ -710,6 +731,199 @@ void Service::precomputeSiblingResult(std::shared_ptr<Operation> left,
   sibling->precomputedResultBecauseSiblingOfService() =
       service->siblingInfo_->precomputedResult_;
   addRuntimeInfo(true);
+}
+
+// _____________________________________________________________________________
+Result Service::computeResultFromWfInvoke(std::string idHex) {
+  // The runtime returns the JSON in the same shape as `wf_runtime_invoke`:
+  //   {"vars": [str, ...], "rows": [[{"name": ..., "value": ...}, ...], ...]}
+  // But per the task spec's JSON→IdTable contract the SERVICE-side reply
+  // is documented in `{"columns": [...], "rows": [[cell, ...], ...]}` shape
+  // where `cell` is a SPARQL-1.1-Results-JSON binding object (type/value/
+  // datatype/xml:lang). `wfInvokeBindingsToResult` accepts either shape,
+  // preferring the SPARQL-1.1 wire form when both are present.
+  std::string reply = sparqlExpression::wf::WfRuntime::instance().invokeById(
+      std::string_view{idHex});
+  return wfInvokeBindingsToResult(reply);
+}
+
+// _____________________________________________________________________________
+Result Service::wfInvokeBindingsToResult(const std::string& json) {
+  nlohmann::json parsed;
+  try {
+    parsed = nlohmann::json::parse(json);
+  } catch (const nlohmann::json::exception& e) {
+    throw std::runtime_error(absl::StrCat(
+        "SERVICE <wf-invoke:...>: runtime returned unparseable JSON: ",
+        e.what()));
+  }
+  if (!parsed.is_object()) {
+    throw std::runtime_error(
+        "SERVICE <wf-invoke:...>: runtime reply is not a JSON object");
+  }
+
+  // Column order: the SERVICE clause's `visibleVariables_` is the ground
+  // truth — that is what the outer plan expects to consume, and it maps
+  // 1:1 to the IdTable columns via `getResultWidth()`. The runtime's
+  // "vars" / "columns" arrays only matter for looking up cells inside a
+  // row when the row uses the wf_runtime_invoke `{"name":..,"value":..}`
+  // shape; the row-index-based shape uses the runtime's array order
+  // and we align it to `visibleVariables_` by name.
+  const auto& visibleVars = parsedServiceClause_.visibleVariables_;
+  std::vector<std::string> colNames;
+  colNames.reserve(visibleVars.size());
+  for (const auto& v : visibleVars) {
+    // Variable names in QLever include the leading `?`; the JSON uses
+    // the bare name.
+    colNames.push_back(v.name().substr(1));
+  }
+
+  // Pull the runtime's "vars" / "columns" list. Prefer "vars" (wire shape
+  // from the Rust runtime), fall back to "columns" (spec shape). Missing
+  // means the runtime emitted a `{"name":..,"value":..}` row shape; we
+  // resolve cells by name in that case.
+  std::vector<std::string> runtimeCols;
+  if (parsed.contains("vars") && parsed["vars"].is_array()) {
+    for (const auto& v : parsed["vars"]) {
+      if (v.is_string()) runtimeCols.push_back(v.get<std::string>());
+    }
+  } else if (parsed.contains("columns") && parsed["columns"].is_array()) {
+    for (const auto& v : parsed["columns"]) {
+      if (v.is_string()) runtimeCols.push_back(v.get<std::string>());
+    }
+  }
+
+  // Map from a colName → runtime index, used when a row is a positional
+  // array. Left empty if `runtimeCols` is empty (name-shape rows).
+  ad_utility::HashMap<std::string, size_t> runtimeColIdx;
+  for (size_t i = 0; i < runtimeCols.size(); ++i) {
+    runtimeColIdx.try_emplace(runtimeCols[i], i);
+  }
+
+  const auto& rowsJson = parsed["rows"];
+  if (!rowsJson.is_array()) {
+    throw std::runtime_error(
+        "SERVICE <wf-invoke:...>: runtime reply missing \"rows\" array");
+  }
+
+  LocalVocab localVocab;
+  IdTable idTable{getResultWidth(), getExecutionContext()->getAllocator()};
+  ad_utility::HashMap<std::string, Id> blankNodeMap;
+
+  // Cells arrive in one of three shapes:
+  //   (a) SPARQL 1.1 Results shape (task-spec example):
+  //         {"type":"literal","value":..,"datatype":..}
+  //   (b) WIT value shape (Rust runtime native):
+  //         {"iri":..} | {"bnode":..}
+  //       | {"literal":{"label":..,"datatype":..,"lang":..|null}}
+  //   (c) `{"name":..,"value":<(a) or (b)>}` wrapper — one element of the
+  //       wf_runtime_invoke row array. Unwrap the "value" and recurse.
+  // We normalise (b) and (c) down to (a) so `bindingToTripleComponent`
+  // does the actual conversion in one place.
+  std::function<TripleComponent(const nlohmann::json&)> cellToTC;
+  cellToTC = [&](const nlohmann::json& cell) -> TripleComponent {
+    if (!cell.is_object()) {
+      return TripleComponent::UNDEF();
+    }
+    // (c): {name, value} wrapper — unwrap and recurse on the inner value.
+    if (cell.contains("name") && cell.contains("value") &&
+        !cell.contains("type")) {
+      return cellToTC(cell["value"]);
+    }
+    // (b): WIT-shape value. Translate to (a) locally rather than opening
+    // a second bindingToTripleComponent-shaped path.
+    if (auto it = cell.find("iri"); it != cell.end() && it->is_string()) {
+      return TripleComponent::Iri::fromIrirefWithoutBrackets(
+          it->get<std::string_view>());
+    }
+    if (auto it = cell.find("bnode"); it != cell.end() && it->is_string()) {
+      // Reuse the SERVICE bnode path (blankNodeMap keyed by lexical form).
+      auto [entry, wasNew] =
+          blankNodeMap.try_emplace(it->get<std::string>(), Id());
+      if (wasNew) {
+        auto* bnMgr =
+            getExecutionContext()->getIndex().getBlankNodeManager();
+        entry->second =
+            Id::makeFromBlankNodeIndex(localVocab.getBlankNodeIndex(bnMgr));
+      }
+      // Wrap back into a TripleComponent whose toValueId is a no-op —
+      // pre-materialised Ids round-trip cleanly through TripleComponent
+      // by way of its Id constructor.
+      return TripleComponent{entry->second};
+    }
+    if (auto litIt = cell.find("literal");
+        litIt != cell.end() && litIt->is_object()) {
+      const auto& lit = *litIt;
+      const std::string label = lit.value("label", "");
+      auto langIt = lit.find("lang");
+      const bool hasLang = langIt != lit.end() && langIt->is_string() &&
+                          !langIt->get<std::string>().empty();
+      if (hasLang) {
+        return TripleComponent::Literal::literalWithNormalizedContent(
+            asNormalizedStringViewUnsafe(label),
+            langIt->get<std::string>());
+      }
+      auto dtIt = lit.find("datatype");
+      if (dtIt != lit.end() && dtIt->is_string() &&
+          !dtIt->get<std::string>().empty() &&
+          dtIt->get<std::string>() !=
+              "http://www.w3.org/2001/XMLSchema#string") {
+        return TurtleParser<TokenizerCtre>::literalAndDatatypeToTripleComponent(
+            label,
+            TripleComponent::Iri::fromIrirefWithoutBrackets(
+                dtIt->get<std::string_view>()),
+            getIndex().encodedIriManager());
+      }
+      return TripleComponent::Literal::literalWithNormalizedContent(
+          asNormalizedStringViewUnsafe(label));
+    }
+    // (a): SPARQL 1.1 Results shape — the shared code path.
+    if (cell.contains("type") && cell.contains("value")) {
+      return bindingToTripleComponent(cell, blankNodeMap, &localVocab);
+    }
+    return TripleComponent::UNDEF();
+  };
+
+  size_t rowIdx = 0;
+  for (const auto& row : rowsJson) {
+    idTable.emplace_back();
+    if (row.is_array()) {
+      // Positional row: index i in the array matches runtimeCols[i]. If
+      // `runtimeCols` is empty (no "vars"/"columns" declared), fall back
+      // to the SERVICE clause's visibleVariables_ order.
+      const auto& order = runtimeCols.empty() ? colNames : runtimeCols;
+      // Build a name→cell map for this row so the outer per-visibleVar
+      // lookup is O(1) regardless of column count.
+      ad_utility::HashMap<std::string, const nlohmann::json*> rowByName;
+      for (size_t i = 0; i < row.size() && i < order.size(); ++i) {
+        rowByName.try_emplace(order[i], &row[i]);
+      }
+      for (size_t col = 0; col < colNames.size(); ++col) {
+        auto it = rowByName.find(colNames[col]);
+        TripleComponent tc =
+            it == rowByName.end() ? TripleComponent::UNDEF() : cellToTC(*it->second);
+        idTable(rowIdx, col) = std::move(tc).toValueId(getIndex(), localVocab);
+      }
+    } else if (row.is_object()) {
+      // Object row (`wf_runtime_invoke`-native shape). Cells arrive as
+      // `[{"name":..,"value":..}, ...]` inside "rows", not as bare
+      // objects — but if a runtime emits `{name: value}` maps we handle
+      // that too by looking each column name up directly.
+      for (size_t col = 0; col < colNames.size(); ++col) {
+        auto it = row.find(colNames[col]);
+        TripleComponent tc =
+            it == row.end() ? TripleComponent::UNDEF() : cellToTC(*it);
+        idTable(rowIdx, col) = std::move(tc).toValueId(getIndex(), localVocab);
+      }
+    } else {
+      throw std::runtime_error(
+          "SERVICE <wf-invoke:...>: row is neither array nor object");
+    }
+    ++rowIdx;
+    checkCancellation();
+  }
+
+  return {std::move(idTable), resultSortedOn(), std::move(localVocab)};
 }
 
 // _____________________________________________________________________________
