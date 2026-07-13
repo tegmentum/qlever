@@ -1069,6 +1069,80 @@ TEST_F(ServiceTest, serviceAllowedIriPrefixes) {
   }
 }
 
+// Verify that plain `http://` SERVICE URLs go through the standard SPARQL
+// 1.1 HTTP dispatch (not through the `wf-invoke:` runtime branch), and
+// that `SERVICE SILENT <http://...>` swallows transport-level exceptions
+// (Connection refused, resolution failure, etc.) while `SERVICE <http://...>`
+// propagates them. Parity-case shape: wf_federation rewrite emits
+// `SERVICE <http://host:port/query>`; the endpoint may be unreachable at
+// query time and SILENT / non-SILENT must diverge accordingly.
+TEST_F(ServiceTest, httpSparqlDispatchAndSilentFallback) {
+  parsedQuery::Service parsedServiceClause{
+      {Variable{"?x"}, Variable{"?y"}},
+      TripleComponent::Iri::fromIriref("<http://127.0.0.1:1/query>"),
+      "",
+      "{ ?x ?p ?y }",
+      false};
+  parsedQuery::Service parsedServiceClauseSilent{
+      {Variable{"?x"}, Variable{"?y"}},
+      TripleComponent::Iri::fromIriref("<http://127.0.0.1:1/query>"),
+      "",
+      "{ ?x ?p ?y }",
+      true};
+
+  // Simulate the transport-level failure that boost::asio raises for a
+  // closed loopback port. `Service::computeResultImpl` sees this as a
+  // std::runtime_error surfaced from the HTTP client.
+  auto connectionRefused = [] {
+    return std::make_exception_ptr(
+        std::runtime_error{"connect: Connection refused"});
+  };
+
+  // 1. Without SILENT: the transport failure must surface as a hard error.
+  Service serviceNoSilent{
+      testQec, parsedServiceClause,
+      getResultFunctionFactory("http://127.0.0.1:1/query",
+                               " SELECT ?x ?y { ?x ?p ?y }", "{}",
+                               boost::beast::http::status::ok,
+                               "application/sparql-results+json",
+                               connectionRefused())};
+  AD_EXPECT_THROW_WITH_MESSAGE(
+      serviceNoSilent.computeResultOnlyForTesting(),
+      ::testing::HasSubstr("Connection refused"));
+
+  // 2. With SILENT: same transport failure must be swallowed and yield a
+  //    single neutral row (`makeNeutralElementResultForSilentFail`).
+  Service serviceSilent{
+      testQec, parsedServiceClauseSilent,
+      getResultFunctionFactory("http://127.0.0.1:1/query",
+                               " SELECT ?x ?y { ?x ?p ?y }", "{}",
+                               boost::beast::http::status::ok,
+                               "application/sparql-results+json",
+                               connectionRefused())};
+  EXPECT_NO_THROW(serviceSilent.computeResultOnlyForTesting());
+
+  // 3. Cross-check: the dispatch check is scheme-based, so the wf:call IRI
+  //    <http://tegmentum.ai/ns/webfunction/call> (which begins with http:
+  //    but is our own filter-function shape) must NOT be short-circuited by
+  //    the wf-invoke: branch — it falls through to the HTTP path just like
+  //    any other http:// URL. We assert this indirectly by constructing a
+  //    Service with that IRI and verifying the HTTP client is what gets
+  //    invoked (matchers on url_ inside getResultFunctionFactory).
+  parsedQuery::Service parsedWfCallIri{
+      {Variable{"?x"}},
+      TripleComponent::Iri::fromIriref(
+          "<http://tegmentum.ai/ns/webfunction/call>"),
+      "",
+      "{ }",
+      false};
+  Service serviceWfCallIri{
+      testQec, parsedWfCallIri,
+      getResultFunctionFactory("http://tegmentum.ai:80/ns/webfunction/call",
+                               " SELECT ?x { }",
+                               genJsonResult({"x"}, {{"a"}}))};
+  EXPECT_NO_THROW(serviceWfCallIri.computeResultOnlyForTesting());
+}
+
 // Test that a `Service` operation correctly passes the `maxRedirects` parameter
 // to the HTTP client. The actual redirect handling is tested in `HttpTest.cpp`.
 TEST_F(ServiceTest, redirectsIntegration) {
