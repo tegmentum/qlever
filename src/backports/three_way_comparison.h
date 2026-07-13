@@ -385,8 +385,16 @@ constexpr inline auto compareThreeWay(const ql::strong_ordering& lhs,
 template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 constexpr inline auto compareThreeWay(const T& /*lhs*/,
                                       const ql::strong_ordering& rhs) {
-  // Invert ordering
-  return 0 <=> rhs;
+  // Invert ordering. `absl::strong_ordering` (aliased as
+  // `ql::strong_ordering`) does not provide `operator<=>(int, strong_ordering)`
+  // in the abseil version pinned here, so fall back to the same comparison
+  // pattern the C++17 branch above uses.
+  if (rhs < 0) {
+    return ql::strong_ordering::greater;
+  } else if (rhs > 0) {
+    return ql::strong_ordering::less;
+  }
+  return ql::strong_ordering::equal;
 }
 
 }  // namespace ql

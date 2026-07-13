@@ -17,7 +17,16 @@ if (APPLE)
         message(STATUS "Found Homebrew at: ${HOMEBREW_PREFIX}")
         list(APPEND CMAKE_PREFIX_PATH "${HOMEBREW_PREFIX}")
         link_directories(${HOMEBREW_PREFIX}/lib)
-        include_directories(${HOMEBREW_PREFIX}/include)
+        # Add Homebrew's include path AFTER the fetched-dependency include
+        # paths (abseil, s2, etc.). Otherwise Homebrew's newer abseil headers
+        # shadow the pinned copy fetched via `FetchContent`, which mixes
+        # `absl::strong_ordering` (distinct from `std::strong_ordering` under
+        # `ABSL_OPTION_USE_STD_ORDERING=0` in Homebrew's build) into TUs that
+        # elsewhere assume `absl::strong_ordering == std::strong_ordering`
+        # (`ABSL_OPTION_USE_STD_ORDERING=2` in the pinned copy), producing
+        # spurious `'auto' in return type deduced as ...` compile errors in
+        # `three_way_comparison.h`, `ValueId.h`, `IdTriple.h`, etc.
+        include_directories(AFTER SYSTEM ${HOMEBREW_PREFIX}/include)
     else()
         message(WARNING "Homebrew not found. You may need to manually set CMAKE_PREFIX_PATH to locate dependencies (Boost, ICU, OpenSSL, etc.)")
     endif()
@@ -481,6 +490,16 @@ set(URIPARSER_BUILD_WCHAR_T OFF CACHE BOOL "" FORCE)
 # Apply FetchContent
 ################################
 FetchContent_MakeAvailable(googletest ctre abseil re2 fsst s2 nlohmann-json antlr range-v3 spatialjoin uriparser)
+# Ensure the pinned, fetched abseil headers win over anything else on the
+# system include path (in particular a Homebrew-installed abseil with a
+# different `ABSL_OPTION_USE_STD_ORDERING`, which would otherwise make
+# `absl::strong_ordering` incompatible with `std::strong_ordering`).
+if (TARGET absl::config)
+    get_target_property(_qlever_abseil_iface_dirs absl::config INTERFACE_INCLUDE_DIRECTORIES)
+    if (_qlever_abseil_iface_dirs)
+        include_directories(BEFORE SYSTEM ${_qlever_abseil_iface_dirs})
+    endif ()
+endif ()
 # Disable some warnings in RE2 and GTEST
 target_compile_options(s2 PRIVATE -Wno-sign-compare -Wno-unused-parameter -Wno-class-memaccess -Wno-comment -Wno-redundant-move -Wno-unknown-warning-option -Wno-maybe-uninitialized -Wno-class-memaccess -Wno-unused-but-set-variable -Wno-unused-function)
 target_compile_options(re2 PRIVATE -Wno-unused-parameter)
