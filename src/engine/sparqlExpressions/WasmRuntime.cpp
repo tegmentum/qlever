@@ -620,6 +620,19 @@ struct WfRuntime::Impl {
     }
   }
 
+  void loadFederationRegistry(const std::string& jsonPath) {
+    char* err = nullptr;
+    const unsigned int rc = ::wf_runtime_load_federation_registry_from_json(
+        handle_, jsonPath.c_str(), &err);
+    if (rc != 0) {
+      std::string msg = err ? std::string("wf: ") + err
+                            : std::string("wf: load-federation-registry failed (rc=") +
+                                  std::to_string(rc) + ")";
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+  }
+
   void setFetchUrl(const std::string& url) {
     char* err = nullptr;
     const unsigned int rc =
@@ -680,6 +693,10 @@ void WfRuntime::loadFulltextRegistryFromJson(std::string_view jsonPath) {
 
 void WfRuntime::loadDocumentRegistryFromJson(std::string_view jsonPath) {
   impl_->loadDocumentRegistry(std::string{jsonPath});
+}
+
+void WfRuntime::loadFederationRegistryFromJson(std::string_view jsonPath) {
+  impl_->loadFederationRegistry(std::string{jsonPath});
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view url) {
@@ -745,6 +762,10 @@ void WfRuntime::loadFulltextRegistryFromJson(std::string_view) {
 
 void WfRuntime::loadDocumentRegistryFromJson(std::string_view) {
   wfDisabledThrow("wf-document-config");
+}
+
+void WfRuntime::loadFederationRegistryFromJson(std::string_view) {
+  wfDisabledThrow("wf-federation-config");
 }
 
 void WfRuntime::setWfFetchUrl(std::string_view) {

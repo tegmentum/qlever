@@ -66,6 +66,7 @@ int main(int argc, char** argv) {
   std::string wfConversionRules;
   std::string wfFulltextConfig;
   std::string wfDocumentConfig;
+  std::string wfFederationConfig;
   std::string wfFetchUrl;
 
   ad_utility::ParameterToProgramOptionFactory optionFactory{
@@ -267,6 +268,17 @@ int main(int argc, char** argv) {
       "runtime's document registry at boot so wf_document SERVICE dispatch "
       "and the periodic Manticore mirror sweep discover their backends. "
       "wf_document reuses wf_fulltext's filter-fold; no new rewrite pass.");
+  add("wf-federation-config",
+      po::value<std::string>(&wfFederationConfig)->default_value(""),
+      "Path to a JSON file of registered federation sources (wf_federation "
+      "v0.1). Format: `{\"sources\":[{\"name\":..,"
+      "\"type\":\"sparql\"|\"wf-search\"|\"wf-fetch\"|\"wf-document\"|"
+      "\"http-sparql\",\"endpoint\":..,\"predicates\":[..],"
+      "\"probe_ttl_secs\":..}, ...]}`. Populates the runtime's federation "
+      "registry at boot so the wf_federation rewrite pass (static source "
+      "selection, filter pushdown, uniform-cost lexicographic reorder over "
+      "BGPs) discovers its sources. Empty (the default) leaves the pass a "
+      "cheap identity. See wf-conformance/docs/design/wf-federation.md §03.");
   add("wf-fetch-url", po::value<std::string>(&wfFetchUrl)->default_value(""),
       "URL of the wf_fetch wasm module used by the shape rewrite pass. "
       "Empty (the default) disables shape rewriting even when "
@@ -333,6 +345,11 @@ int main(int argc, char** argv) {
       wfRuntime.loadDocumentRegistryFromJson(wfDocumentConfig);
       AD_LOG_INFO << "wf: loaded document registry from " << wfDocumentConfig
                   << std::endl;
+    }
+    if (!wfFederationConfig.empty()) {
+      wfRuntime.loadFederationRegistryFromJson(wfFederationConfig);
+      AD_LOG_INFO << "wf: loaded federation registry from "
+                  << wfFederationConfig << std::endl;
     }
     if (!wfFetchUrl.empty()) {
       wfRuntime.setWfFetchUrl(wfFetchUrl);

@@ -99,6 +99,18 @@ class WfRuntime {
   // parity cases are configured. v0.2 companion to
   // `loadFulltextRegistryFromJson`.
   void loadDocumentRegistryFromJson(std::string_view jsonPath);
+  // Populate the runtime's federation-source registry from a JSON file.
+  // Expected shape mirrors the sibling Rust
+  // `federation_registry::FederationRegistry`: top-level
+  // `{ "sources": [...] }` with per-entry name / type
+  // (sparql|wf-search|wf-fetch|wf-document|http-sparql) / endpoint /
+  // optional predicates / optional probe_ttl_secs. Consumed by the
+  // `wf_federation_rewrite` pass (v0.1: static source selection,
+  // filter pushdown, uniform-cost lexicographic reorder over BGPs).
+  // Safe to leave unset when no federation parity cases are
+  // configured. See `wf-conformance/docs/design/wf-federation.md`
+  // §03, §04.
+  void loadFederationRegistryFromJson(std::string_view jsonPath);
   void setWfFetchUrl(std::string_view url);
 
   WfRuntime(const WfRuntime&) = delete;
