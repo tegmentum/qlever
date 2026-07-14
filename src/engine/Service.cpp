@@ -479,11 +479,30 @@ TripleComponent Service::bindingToTripleComponent(
   // some SPARQL endpoints, and we therefore support parsing it.
   if (type == "literal" || type == "typed-literal") {
     if (binding.contains("datatype")) {
-      tc = TurtleParser<TokenizerCtre>::literalAndDatatypeToTripleComponent(
-          value,
-          TripleComponent::Iri::fromIrirefWithoutBrackets(
-              binding["datatype"].get<std::string_view>()),
-          getIndex().encodedIriManager());
+      const auto dt = binding["datatype"].get<std::string_view>();
+      // xsd:double / xsd:float need a special-case because QLever's
+      // ExportIds packs both via `Datatype::Double` and emits them
+      // as `xsd:decimal` on export (see
+      // `idToStringAndTypeForEncodedValue` in
+      // `src/index/ExportIds.cpp`). Remote SERVICE endpoints (and our
+      // wf_vector guest) return scores typed as `xsd:double`; going
+      // through the parser here would silently downgrade the datatype
+      // at export time and break parity with the Rust engines. Build
+      // the Literal directly with the datatype attached — it lands in
+      // the LocalVocab with an intact descriptor, and the SPARQL
+      // Results JSON export preserves the original datatype IRI
+      // verbatim. Mirrors the WIT-shape path in `cellToTC`.
+      if (dt == "http://www.w3.org/2001/XMLSchema#double" ||
+          dt == "http://www.w3.org/2001/XMLSchema#float") {
+        tc = TripleComponent::Literal::literalWithNormalizedContent(
+            asNormalizedStringViewUnsafe(value),
+            TripleComponent::Iri::fromIrirefWithoutBrackets(dt));
+      } else {
+        tc = TurtleParser<TokenizerCtre>::literalAndDatatypeToTripleComponent(
+            value,
+            TripleComponent::Iri::fromIrirefWithoutBrackets(dt),
+            getIndex().encodedIriManager());
+      }
     } else if (binding.contains("xml:lang")) {
       tc = TripleComponent::Literal::literalWithNormalizedContent(
           asNormalizedStringViewUnsafe(value),
