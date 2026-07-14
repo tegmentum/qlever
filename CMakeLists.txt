@@ -351,6 +351,19 @@ endif ()
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${ADDITIONAL_LINKER_FLAGS}")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${ADDITIONAL_LINKER_FLAGS}")
 
+# On macOS, the qlever-wf-runtime Rust staticlib pulls in `whoami` (transitively
+# via tokio-postgres, since PostgresSink landed) which calls
+# `SCDynamicStoreCopyConsoleUser` from Apple's SystemConfiguration framework.
+# Without an explicit link the C++ executable link fails with unresolved
+# `_SCDynamicStoreCopy*` symbols. Cargo emits `cargo:rustc-link-lib=framework=…`
+# hints, but they are only honored when Cargo drives the final link — here CMake
+# does, so the framework has to be added explicitly. Linux/Windows builds are
+# unaffected; guard by APPLE so the flag never leaks off-platform.
+if (APPLE)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -framework SystemConfiguration")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -framework SystemConfiguration")
+endif ()
+
 
 if (${PERFTOOLS_PROFILER})
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lprofiler")
