@@ -327,6 +327,275 @@ std::string httpPost(const std::string& host, int port,
   return body_out;
 }
 
+// ---- N-Triples response parsing (CONSTRUCT fallback) -------------------
+
+// Sniff a response body: true iff it looks like an N-Triples payload
+// rather than a SPARQL-Results JSON object.
+//
+// QLever's /query endpoint serves CONSTRUCT results as raw N-Triples
+// (turtle-format) text regardless of the Accept header the client sent —
+// see ExportQueryExecutionTrees::constructQueryResultToStream: `qleverJson`
+// / `sparqlJson` / `sparqlXml` / `octetStream` are all rejected for
+// CONSTRUCT with an explicit AD_THROW, so the only branch the runtime
+// takes is the turtle serializer, which emits fully-expanded N-Triples
+// lines (`<s> <p> <o> .`) because CONSTRUCT rewriting is deliberately
+// deferred. That means the `Content-Type: application/sparql-results+json`
+// we ask for is a hint the server ignores for graph shapes, and the shim
+// has to figure the shape out from the body itself.
+//
+// A SPARQL-Results JSON body starts with `{`; an N-Triples body starts
+// with `<` (IRI subject), `_` (blank-node subject), or `#` (comment).
+// Empty bodies fall through to the JSON path so an empty result still
+// surfaces its json parse error rather than silently producing zero rows.
+bool looksLikeNTriples(const std::string& body) {
+  for (char c : body) {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+    return c == '<' || c == '_' || c == '#';
+  }
+  return false;
+}
+
+// Unescape one N-Triples "..."-quoted literal lexical form.
+// Handles the escape set from the N-Triples 1.1 grammar (ECHAR + UCHAR):
+// \\, \", \t, \n, \r, \b, \f, \uXXXX, \UXXXXXXXX. Unknown escapes fall
+// through so a malformed input at least round-trips something visible.
+std::string unescapeNTriplesLiteral(const std::string& in) {
+  std::string out;
+  out.reserve(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    char c = in[i];
+    if (c != '\\' || i + 1 >= in.size()) {
+      out += c;
+      continue;
+    }
+    char n = in[i + 1];
+    switch (n) {
+      case '\\': out += '\\'; ++i; break;
+      case '"':  out += '"';  ++i; break;
+      case '\'': out += '\''; ++i; break;
+      case 't':  out += '\t'; ++i; break;
+      case 'n':  out += '\n'; ++i; break;
+      case 'r':  out += '\r'; ++i; break;
+      case 'b':  out += '\b'; ++i; break;
+      case 'f':  out += '\f'; ++i; break;
+      case '/':  out += '/';  ++i; break;
+      case 'u':
+      case 'U': {
+        const size_t hexLen = (n == 'u') ? 4 : 8;
+        if (i + 1 + hexLen >= in.size()) {
+          out += c;
+          continue;
+        }
+        uint32_t cp = 0;
+        bool ok = true;
+        for (size_t j = 0; j < hexLen; ++j) {
+          char h = in[i + 2 + j];
+          uint32_t d;
+          if (h >= '0' && h <= '9') d = static_cast<uint32_t>(h - '0');
+          else if (h >= 'a' && h <= 'f') d = 10u + static_cast<uint32_t>(h - 'a');
+          else if (h >= 'A' && h <= 'F') d = 10u + static_cast<uint32_t>(h - 'A');
+          else { ok = false; break; }
+          cp = (cp << 4) | d;
+        }
+        if (!ok) {
+          out += c;
+          continue;
+        }
+        // Encode the code point as UTF-8.
+        if (cp < 0x80u) {
+          out += static_cast<char>(cp);
+        } else if (cp < 0x800u) {
+          out += static_cast<char>(0xC0u | (cp >> 6));
+          out += static_cast<char>(0x80u | (cp & 0x3Fu));
+        } else if (cp < 0x10000u) {
+          out += static_cast<char>(0xE0u | (cp >> 12));
+          out += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+          out += static_cast<char>(0x80u | (cp & 0x3Fu));
+        } else {
+          out += static_cast<char>(0xF0u | (cp >> 18));
+          out += static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu));
+          out += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+          out += static_cast<char>(0x80u | (cp & 0x3Fu));
+        }
+        i += 1 + hexLen;
+        break;
+      }
+      default:
+        out += c;
+        break;
+    }
+  }
+  return out;
+}
+
+// Parse a single N-Triples term (IRI, blank node, or literal) beginning
+// at `pos` in `line`. On success, `pos` is advanced past the term and
+// `out` is populated as a WIT-shape value object. Throws on malformed
+// input so the surrounding callback can bubble the error up as a clean
+// err<string> to the guest rather than materialising a wrong triple.
+void parseNTriplesTerm(const std::string& line, size_t& pos,
+                       nlohmann::json& out) {
+  while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) ++pos;
+  if (pos >= line.size()) {
+    throw std::runtime_error("N-Triples parse: unexpected end of term");
+  }
+  const char c = line[pos];
+  if (c == '<') {
+    const size_t end = line.find('>', pos + 1);
+    if (end == std::string::npos) {
+      throw std::runtime_error("N-Triples parse: unterminated IRI");
+    }
+    out["iri"] = line.substr(pos + 1, end - pos - 1);
+    pos = end + 1;
+  } else if (c == '_' && pos + 1 < line.size() && line[pos + 1] == ':') {
+    size_t start = pos + 2;
+    size_t end = start;
+    while (end < line.size() && line[end] != ' ' && line[end] != '\t' &&
+           line[end] != '.') {
+      ++end;
+    }
+    out["bnode"] = line.substr(start, end - start);
+    pos = end;
+  } else if (c == '"') {
+    size_t start = pos + 1;
+    size_t end = start;
+    while (end < line.size()) {
+      if (line[end] == '\\' && end + 1 < line.size()) {
+        end += 2;
+        continue;
+      }
+      if (line[end] == '"') break;
+      ++end;
+    }
+    if (end >= line.size()) {
+      throw std::runtime_error("N-Triples parse: unterminated literal");
+    }
+    const std::string lex =
+        unescapeNTriplesLiteral(line.substr(start, end - start));
+    pos = end + 1;
+    nlohmann::json lit = nlohmann::json::object();
+    lit["label"] = lex;
+    if (pos < line.size() && line[pos] == '@') {
+      size_t lstart = pos + 1;
+      size_t lend = lstart;
+      while (lend < line.size() && line[lend] != ' ' && line[lend] != '\t' &&
+             line[lend] != '.') {
+        ++lend;
+      }
+      lit["lang"] = line.substr(lstart, lend - lstart);
+      lit["datatype"] =
+          "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+      pos = lend;
+    } else if (pos + 1 < line.size() && line[pos] == '^' &&
+               line[pos + 1] == '^') {
+      pos += 2;
+      while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
+        ++pos;
+      }
+      if (pos >= line.size() || line[pos] != '<') {
+        throw std::runtime_error(
+            "N-Triples parse: expected <datatype-iri> after ^^");
+      }
+      const size_t dend = line.find('>', pos + 1);
+      if (dend == std::string::npos) {
+        throw std::runtime_error(
+            "N-Triples parse: unterminated datatype IRI");
+      }
+      lit["datatype"] = line.substr(pos + 1, dend - pos - 1);
+      lit["lang"] = nullptr;
+      pos = dend + 1;
+    } else {
+      lit["datatype"] = "http://www.w3.org/2001/XMLSchema#string";
+      lit["lang"] = nullptr;
+    }
+    out["literal"] = lit;
+  } else {
+    throw std::runtime_error(
+        std::string{"N-Triples parse: unexpected character '"} + c + "'");
+  }
+}
+
+// Convert an N-Triples response body into the WIT-shape binding-sets JSON
+// the guest expects. Vars are `s`/`p`/`o` (one row per triple) to mirror
+// oxigraph-wf's QueryResults::Graph shape (~/git/oxigraph-wf/src/host.rs
+// l.1025-1051) and the CONSTRUCT-shape dispatch the Jena/RDF4J adapters
+// emit — guests such as wf_infer's `bulk_insert` (~/git/tegmentum-
+// webfunctions/crates/wf_infer/src/lib.rs l.337-357) key off exactly
+// those three names, so cross-engine parity requires this envelope.
+nlohmann::json convertNTriplesToWit(const std::string& body) {
+  nlohmann::json out = nlohmann::json::object();
+  out["vars"] = nlohmann::json::array({"s", "p", "o"});
+  nlohmann::json rows = nlohmann::json::array();
+
+  size_t i = 0;
+  while (i < body.size()) {
+    while (i < body.size() && (body[i] == ' ' || body[i] == '\t' ||
+                                body[i] == '\r' || body[i] == '\n')) {
+      ++i;
+    }
+    if (i >= body.size()) break;
+    if (body[i] == '#') {
+      while (i < body.size() && body[i] != '\n') ++i;
+      continue;
+    }
+    size_t line_end = body.find('\n', i);
+    if (line_end == std::string::npos) line_end = body.size();
+    std::string line = body.substr(i, line_end - i);
+    i = line_end;
+
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' ||
+                              line.back() == '\r')) {
+      line.pop_back();
+    }
+    if (line.empty()) continue;
+    if (line.back() != '.') {
+      throw std::runtime_error(
+          "N-Triples parse: line does not end with '.': " +
+          line.substr(0, 120));
+    }
+    line.pop_back();
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) {
+      line.pop_back();
+    }
+
+    size_t pos = 0;
+    nlohmann::json s = nlohmann::json::object();
+    nlohmann::json p = nlohmann::json::object();
+    nlohmann::json o = nlohmann::json::object();
+    parseNTriplesTerm(line, pos, s);
+    parseNTriplesTerm(line, pos, p);
+    parseNTriplesTerm(line, pos, o);
+    // Anything after the object (before the stripped `.`) is unexpected;
+    // silently ignore trailing whitespace but reject stray tokens so a
+    // subject-with-embedded-space bug doesn't drop rows silently.
+    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
+      ++pos;
+    }
+    if (pos != line.size()) {
+      throw std::runtime_error(
+          "N-Triples parse: trailing content after object: " +
+          line.substr(pos, 80));
+    }
+
+    nlohmann::json row = nlohmann::json::array();
+    nlohmann::json bindS = nlohmann::json::object();
+    bindS["name"] = "s";
+    bindS["value"] = s;
+    row.push_back(bindS);
+    nlohmann::json bindP = nlohmann::json::object();
+    bindP["name"] = "p";
+    bindP["value"] = p;
+    row.push_back(bindP);
+    nlohmann::json bindO = nlohmann::json::object();
+    bindO["name"] = "o";
+    bindO["value"] = o;
+    row.push_back(bindO);
+    rows.push_back(row);
+  }
+  out["rows"] = rows;
+  return out;
+}
+
 // ---- SPARQL 1.1 Results JSON → WIT binding-sets JSON --------------------
 
 // Convert a parsed SPARQL 1.1 Results JSON object into the WIT-shape
@@ -452,8 +721,19 @@ extern "C" char* wfExecuteQueryCallback(void* /*user_data*/,
     }
     --gCallbackDepth;
 
-    nlohmann::json parsed = nlohmann::json::parse(body);
-    nlohmann::json wit = convertSparqlResultsToWit(parsed);
+    // QLever's /query returns CONSTRUCT results as N-Triples text no
+    // matter what Accept header we sent (see `looksLikeNTriples` above),
+    // so sniff the body shape and dispatch. SELECT/ASK still take the
+    // SPARQL-Results JSON path; CONSTRUCT/DESCRIBE take the s/p/o
+    // binding-sets envelope that matches oxigraph-wf's QueryResults::Graph
+    // shape and the Jena/RDF4J CONSTRUCT dispatch.
+    nlohmann::json wit;
+    if (looksLikeNTriples(body)) {
+      wit = convertNTriplesToWit(body);
+    } else {
+      nlohmann::json parsed = nlohmann::json::parse(body);
+      wit = convertSparqlResultsToWit(parsed);
+    }
 
     // ABI comment on max_rows: -1 means no cap; positive value is a hard
     // row cap. Applied post-fetch because SPARQL LIMIT would change the
