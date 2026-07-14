@@ -868,6 +868,24 @@ Result Service::wfInvokeBindingsToResult(const std::string& json) {
           !dtIt->get<std::string>().empty() &&
           dtIt->get<std::string>() !=
               "http://www.w3.org/2001/XMLSchema#string") {
+        const std::string dt = dtIt->get<std::string>();
+        // xsd:double / xsd:float need a special-case because QLever's
+        // ExportIds packs both via `Datatype::Double` and emits them
+        // as `xsd:decimal` on export (see
+        // `idToStringAndTypeForEncodedValue` in
+        // `src/index/ExportIds.cpp`). The wf_fulltext guest returns
+        // scores typed as `xsd:double`; going through the parser here
+        // would silently downgrade the datatype at export time and
+        // break parity with the Rust engines. Build the Literal
+        // directly with the datatype attached — it lands in the
+        // LocalVocab with an intact descriptor, and the SPARQL Results
+        // JSON export preserves the original datatype IRI verbatim.
+        if (dt == "http://www.w3.org/2001/XMLSchema#double" ||
+            dt == "http://www.w3.org/2001/XMLSchema#float") {
+          return TripleComponent::Literal::literalWithNormalizedContent(
+              asNormalizedStringViewUnsafe(label),
+              TripleComponent::Iri::fromIrirefWithoutBrackets(dt));
+        }
         return TurtleParser<TokenizerCtre>::literalAndDatatypeToTripleComponent(
             label,
             TripleComponent::Iri::fromIrirefWithoutBrackets(
