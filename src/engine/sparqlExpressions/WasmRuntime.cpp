@@ -31,18 +31,43 @@
 // re-entry so a guest that introspects mid-recursion sees a truthful
 // depth value.
 //
+// Host callbacks (v0.7 add): `execute-update` uses the same HTTP-loopback
+// dispatch as `execute-query` — the update text is POSTed to qlever-
+// server with `Content-Type: application/sparql-update` (the same wire
+// shape a Web-facing SPARQL 1.1 UPDATE client sends). This lets guests
+// that mutate the store (wf_pipeline steps of kind sparql_update;
+// wf_infer's CLEAR + INSERT DATA loop) run without in-process re-entry
+// into the query engine's transaction machinery. QLever's own /update
+// handler applies changes to DeltaTriples atomically, so subsequent
+// execute-query callbacks in the same wasm invocation observe the write
+// through the standard permutation-scan path. QLever guards update with
+// an access-token check — the loopback caller must supply the same token
+// qlever-server was started with, sourced from QLEVER_LOOPBACK_ACCESS_TOKEN
+// (see below).
+//
 // Configuration:
 //   QLEVER_LOOPBACK_PORT — the TCP port qlever-server listens on. If unset
-//                          at callback time, `execute-query` returns
-//                          err<string>, matching pre-v0.5 behaviour. This
-//                          keeps guests that never call `execute-query`
+//                          at callback time, `execute-query` and
+//                          `execute-update` both return err<string>,
+//                          matching pre-v0.5 behaviour. This keeps guests
+//                          that never call the host callbacks
 //                          (`to_upper`, `debug_callback_depth`, ...)
 //                          working without any deployment change.
 //
-// prepare-query / run-prepared / execute-update / follow-predicate are
-// still stubbed in the Rust runtime; guests that reach for them (wf_tree,
-// wf_tree_rows, adjacency_tree) will surface a clean err<string>. Wiring
-// those is a follow-up on the runtime side.
+//   QLEVER_LOOPBACK_ACCESS_TOKEN — access token forwarded as the
+//                          `?access-token=…` query parameter on
+//                          `execute-update` roundtrips. Must match
+//                          whatever qlever-server was started with via
+//                          `--access-token`. Optional if the server was
+//                          started with `--no-access-check`; required
+//                          otherwise (Server.cpp visitUpdate calls
+//                          requireValidAccessToken()). Not used on the
+//                          read-only `execute-query` path.
+//
+// prepare-query / run-prepared / follow-predicate are still stubbed in
+// the Rust runtime; guests that reach for those (wf_tree, wf_tree_rows,
+// adjacency_tree) will surface a clean err<string>. Wiring those is a
+// follow-up on the runtime side.
 
 #include "engine/sparqlExpressions/WasmRuntime.h"
 
@@ -455,6 +480,93 @@ extern "C" char* wfExecuteQueryCallback(void* /*user_data*/,
   }
 }
 
+// C ABI callback for `execute-update`. Return contract per the Rust-side
+// `wf_execute_update_cb`: NULL on success (WIT ok), non-NULL malloc'd
+// error string on failure (which the Rust runtime free()s and wraps as
+// err<string>). `err_out` is set to NULL on success and left untouched on
+// failure — the returned string carries the failure message directly.
+//
+// Wire shape: POST /?access-token=<token> with body = update text and
+// Content-Type: application/sparql-update. That's the wire that QLever's
+// SparqlProtocol::parsePOST routes to visitUpdate (see qlever/src/engine/
+// SparqlProtocol.cpp l.138). Any non-2xx response body is bubbled up as
+// the failure message.
+extern "C" char* wfExecuteUpdateCallback(void* /*user_data*/,
+                                         const char* sparql_c,
+                                         char** err_out) {
+  try {
+    const char* port_env = std::getenv("QLEVER_LOOPBACK_PORT");
+    if (!port_env || !*port_env) {
+      return mallocDup(
+          "execute-update: QLEVER_LOOPBACK_PORT unset — cannot loop back to "
+          "qlever-server. Start the server with `qlever-server --port N` and "
+          "set QLEVER_LOOPBACK_PORT=N in the same environment.");
+    }
+    const int port = std::atoi(port_env);
+    if (port <= 0 || port > 65535) {
+      return mallocDup("execute-update: QLEVER_LOOPBACK_PORT out of range");
+    }
+
+    // Access token is required by qlever-server's visitUpdate path unless
+    // the server was started with --no-access-check. Sourced from the
+    // environment so it can be flipped without rebuilding qlever-server.
+    // If unset, we still attempt the update — qlever-server will reject
+    // with a "requires a valid access token" error we bubble up verbatim,
+    // which is easier to diagnose than a silent misconfiguration.
+    const char* token_env = std::getenv("QLEVER_LOOPBACK_ACCESS_TOKEN");
+    std::string path = "/";
+    if (token_env && *token_env) {
+      // Very small subset of URL encoding — the token is a config-time
+      // secret whose character set the deployer controls. We only guard
+      // the couple of characters that would break the query-string parse.
+      std::string enc;
+      enc.reserve(std::strlen(token_env));
+      for (const char* p = token_env; *p; ++p) {
+        char c = *p;
+        if (c == '&' || c == '=' || c == '#' || c == '%' || c == ' ' ||
+            c == '?') {
+          char buf[4];
+          std::snprintf(buf, sizeof(buf), "%%%02X",
+                        static_cast<unsigned char>(c));
+          enc += buf;
+        } else {
+          enc += c;
+        }
+      }
+      path = "/?access-token=" + enc;
+    }
+
+    const std::string sparql = sparql_c ? std::string(sparql_c) : std::string{};
+
+    ++gCallbackDepth;
+    std::string body;
+    try {
+      // qlever-server's parsePOST dispatches on Content-Type, so the path
+      // itself doesn't need to be `/update` — the update-vs-query
+      // discrimination happens on the header. Accept an empty body on
+      // success (updates return "" or a small metadata JSON depending on
+      // how the server was configured).
+      body = httpPost("127.0.0.1", port, path, sparql,
+                      "application/sparql-update",
+                      "application/qlever-results+json");
+    } catch (...) {
+      --gCallbackDepth;
+      throw;
+    }
+    --gCallbackDepth;
+
+    // Success. The result body (if any) is metadata about the update; the
+    // WIT return is `result<_, string>` so we drop the payload and just
+    // signal ok by returning NULL.
+    *err_out = nullptr;
+    return nullptr;
+  } catch (const std::exception& e) {
+    return mallocDup(std::string{"execute-update: "} + e.what());
+  } catch (...) {
+    return mallocDup("execute-update: unknown error");
+  }
+}
+
 }  // namespace
 
 struct WfRuntime::Impl {
@@ -474,6 +586,7 @@ struct WfRuntime::Impl {
     callbacks.callback_depth = &wfCallbackDepth;
     callbacks.reserved_prepare_query = nullptr;
     callbacks.reserved_run_prepared = nullptr;
+    callbacks.execute_update = &wfExecuteUpdateCallback;
 
     handle_ = ::wf_runtime_new_with_callbacks(&callbacks);
     if (!handle_) {
