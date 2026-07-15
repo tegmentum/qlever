@@ -1038,6 +1038,29 @@ struct WfRuntime::Impl {
       throw std::runtime_error(msg);
     }
   }
+
+  std::string runCanonicalizeSweep(const std::string& wasmUrl,
+                                   const std::string& sinkUrl, bool fullScan) {
+    char* err = nullptr;
+    const char* out = ::wf_runtime_run_canonicalize_sweep(
+        handle_, wasmUrl.c_str(), sinkUrl.c_str(), fullScan ? 1 : 0, &err);
+    if (!out) {
+      std::string msg = err ? std::string("wf-canonicalize: ") + err
+                            : std::string("wf-canonicalize: unknown error");
+      if (err) ::wf_runtime_free_string(err);
+      throw std::runtime_error(msg);
+    }
+    std::string result{out};
+    ::wf_runtime_free_string(out);
+    return result;
+  }
+
+  // Canonicalize-sweep configuration — captured once at server boot from
+  // ServerMain's CLI flags and consumed by Server::process's
+  // /admin/canonicalize-sweep handler. Empty when the operator didn't
+  // configure the sweep; the endpoint returns a 400 in that case.
+  std::string canonicalizeWasmUrl_;
+  std::string canonicalizeSinkUrl_;
 };
 
 WfRuntime::WfRuntime() : impl_(new Impl()) {}
@@ -1094,6 +1117,27 @@ void WfRuntime::loadFederationRegistryFromJson(std::string_view jsonPath) {
 
 void WfRuntime::setWfFetchUrl(std::string_view url) {
   impl_->setFetchUrl(std::string{url});
+}
+
+void WfRuntime::setCanonicalizeConfig(std::string_view wasmUrl,
+                                      std::string_view sinkUrl) {
+  impl_->canonicalizeWasmUrl_.assign(wasmUrl.data(), wasmUrl.size());
+  impl_->canonicalizeSinkUrl_.assign(sinkUrl.data(), sinkUrl.size());
+}
+
+const std::string& WfRuntime::canonicalizeWasmUrl() const {
+  return impl_->canonicalizeWasmUrl_;
+}
+
+const std::string& WfRuntime::canonicalizeSinkUrl() const {
+  return impl_->canonicalizeSinkUrl_;
+}
+
+std::string WfRuntime::runCanonicalizeSweep(std::string_view wasmUrl,
+                                            std::string_view sinkUrl,
+                                            bool fullScan) {
+  return impl_->runCanonicalizeSweep(std::string{wasmUrl}, std::string{sinkUrl},
+                                     fullScan);
 }
 
 #else  // !QLEVER_ENABLE_WF
@@ -1163,6 +1207,32 @@ void WfRuntime::loadFederationRegistryFromJson(std::string_view) {
 
 void WfRuntime::setWfFetchUrl(std::string_view) {
   wfDisabledThrow("wf-fetch-url");
+}
+
+void WfRuntime::setCanonicalizeConfig(std::string_view, std::string_view) {
+  // Silently ignore in the disabled build so a --wf-canonicalize-wasm-url
+  // supplied against a non-wf QLever doesn't crash the server at boot.
+  // The endpoint itself will still 404 (no route registered) because the
+  // ifdef guarding /admin/canonicalize-sweep in Server.cpp keys off
+  // WfRuntime::isEnabled().
+}
+
+const std::string& WfRuntime::canonicalizeWasmUrl() const {
+  static const std::string empty;
+  return empty;
+}
+
+const std::string& WfRuntime::canonicalizeSinkUrl() const {
+  static const std::string empty;
+  return empty;
+}
+
+std::string WfRuntime::runCanonicalizeSweep(std::string_view, std::string_view,
+                                            bool) {
+  throw std::runtime_error(
+      "wf-canonicalize: this QLever build was compiled without "
+      "QLEVER_ENABLE_WF; the /admin/canonicalize-sweep endpoint is not "
+      "available.");
 }
 
 #endif

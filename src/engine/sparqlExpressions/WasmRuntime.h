@@ -113,6 +113,30 @@ class WfRuntime {
   void loadFederationRegistryFromJson(std::string_view jsonPath);
   void setWfFetchUrl(std::string_view url);
 
+  // Store the wf_canonicalize.wasm URL + SQLite sink URL used by the
+  // /admin/canonicalize-sweep endpoint. Both may be empty (in which case
+  // hitting the endpoint returns a 400 that names the missing
+  // configuration). Populated once at server boot from ServerMain's
+  // --wf-canonicalize-wasm-url / --wf-alias-db + --wf-alias-table.
+  void setCanonicalizeConfig(std::string_view wasmUrl,
+                             std::string_view sinkUrl);
+  // Getters used by Server::process's /admin/canonicalize-sweep handler to
+  // decide whether the endpoint has been configured before it invokes the
+  // wasm (an unconfigured call would otherwise reach the Rust runtime and
+  // fail there with a less helpful message).
+  const std::string& canonicalizeWasmUrl() const;
+  const std::string& canonicalizeSinkUrl() const;
+
+  // Invoke wf_canonicalize.wasm against the current fulltext + document
+  // registries. Mirrors oxigraph-wf's /admin/canonicalize-sweep behaviour
+  // — the sweep endpoint on both engines hands the guest the same config
+  // JSON. Returns the guest's raw JSON reply (a single-row binding-set
+  // with count fields the caller can wrap into an HTTP response body).
+  // Throws std::runtime_error on any wasm-side or transport failure.
+  std::string runCanonicalizeSweep(std::string_view wasmUrl,
+                                   std::string_view sinkUrl,
+                                   bool fullScan);
+
   WfRuntime(const WfRuntime&) = delete;
   WfRuntime& operator=(const WfRuntime&) = delete;
 

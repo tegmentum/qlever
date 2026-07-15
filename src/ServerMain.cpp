@@ -68,6 +68,13 @@ int main(int argc, char** argv) {
   std::string wfDocumentConfig;
   std::string wfFederationConfig;
   std::string wfFetchUrl;
+  // wf_canonicalize sweep endpoint (POST /admin/canonicalize-sweep).
+  // Optional; when unset the endpoint returns a 400 that names the
+  // missing flag. Mirrors oxigraph-wf's `--canonicalize-wasm-url` +
+  // `--alias-map` pair — QLever reuses the existing --wf-alias-db /
+  // --wf-alias-table flags to derive the SQLite sink URL rather than
+  // introducing a second flag whose value has to stay in lockstep.
+  std::string wfCanonicalizeWasmUrl;
 
   ad_utility::ParameterToProgramOptionFactory optionFactory{
       &globalRuntimeParameters};
@@ -283,6 +290,17 @@ int main(int argc, char** argv) {
       "URL of the wf_fetch wasm module used by the shape rewrite pass. "
       "Empty (the default) disables shape rewriting even when "
       "--wf-shape-db is populated.");
+  add("wf-canonicalize-wasm-url",
+      po::value<std::string>(&wfCanonicalizeWasmUrl)->default_value(""),
+      "URL of the wf_canonicalize wasm module invoked by "
+      "POST /admin/canonicalize-sweep. When set together with "
+      "--wf-alias-db, the endpoint reconciles the fulltext literal-index "
+      "and document-index registries against their backing stores on "
+      "operator request (mirrors the oxigraph-wf endpoint of the same "
+      "name). The SQLite sink URL passed to the guest is derived as "
+      "`sqlite://<wf-alias-db>#<wf-alias-table>` — a single flag pair "
+      "avoids the two-flag drift problem. Empty (the default) leaves "
+      "the endpoint returning 400 with a hint at the missing flag.");
   add("construct-deduplication",
       optionFactory
           .getProgramOption<&RuntimeParameters::constructDeduplication_>(),
@@ -355,6 +373,27 @@ int main(int argc, char** argv) {
       wfRuntime.setWfFetchUrl(wfFetchUrl);
       AD_LOG_INFO << "wf: shape rewrite will dispatch to " << wfFetchUrl
                   << std::endl;
+    }
+    // Canonicalize-sweep endpoint wiring. Both the wasm URL and an alias
+    // db path are required; if only one is set we log the mismatch and
+    // leave the endpoint disabled so a POST returns 400 with a useful
+    // message rather than 500-ing from the Rust side. Sink URL shape is
+    // `sqlite://<db>#<table>`, matching the wf_canonicalize guest's
+    // parser (same wire form oxigraph-wf uses).
+    if (!wfCanonicalizeWasmUrl.empty()) {
+      if (wfAliasDb.empty()) {
+        AD_LOG_WARN << "wf: --wf-canonicalize-wasm-url is set but "
+                       "--wf-alias-db is not; /admin/canonicalize-sweep "
+                       "will 400 until both are supplied"
+                    << std::endl;
+      } else {
+        std::string sinkUrl =
+            "sqlite://" + wfAliasDb + "#" + wfAliasTable;
+        wfRuntime.setCanonicalizeConfig(wfCanonicalizeWasmUrl, sinkUrl);
+        AD_LOG_INFO
+            << "wf: /admin/canonicalize-sweep enabled, wasm=" << wfCanonicalizeWasmUrl
+            << " sink=" << sinkUrl << std::endl;
+      }
     }
   } catch (const std::exception& e) {
     AD_LOG_ERROR << "wf: configuration failed: " << e.what() << std::endl;

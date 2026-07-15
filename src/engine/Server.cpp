@@ -40,6 +40,7 @@
 #include "util/QueryEventLog.h"
 #include "util/TimeTracer.h"
 #include "util/TypeTraits.h"
+#include "engine/sparqlExpressions/WasmRuntime.h"
 #include "util/http/HttpServer.h"
 #include "util/http/HttpUtils.h"
 #include "util/http/websocket/MessageSender.h"
@@ -575,6 +576,77 @@ CPP_template_def(typename RequestT, typename ResponseT)(
     }
     response = createOkResponse("This QLever server is up and running\n",
                                 request, MediaType::textPlain);
+  }
+
+  // wf_canonicalize sweep: mirrors oxigraph-wf's POST
+  // /admin/canonicalize-sweep. Reconciles the fulltext + document
+  // registries against their backing stores by invoking
+  // wf_canonicalize.wasm via the qlever-wf-runtime dispatcher. This is
+  // the trigger surface the wf-conformance adapter pokes before
+  // dispatching document/fulltext parity queries in `managed` mode —
+  // without it, the guest's `/search` calls hit an empty backend and
+  // 500 with "unknown local table". Requires both
+  // --wf-canonicalize-wasm-url and --wf-alias-db to have been set on
+  // the server; absent either flag we return a 400 whose body names the
+  // missing configuration. Optional `?full_scan=true` on the URL forces
+  // the guest to re-mirror every revision (used for the one-shot
+  // backfill on initial retention=all enablement); default is
+  // incremental.
+  if (parsedHttpRequest.path_ == "/admin/canonicalize-sweep") {
+    if (!sparqlExpression::wf::WfRuntime::isEnabled()) {
+      response = createHttpResponseFromString(
+          "wf-canonicalize: this QLever build was compiled without "
+          "QLEVER_ENABLE_WF; the /admin/canonicalize-sweep endpoint is "
+          "not available.\n",
+          http::status::not_implemented, request, MediaType::textPlain);
+    } else {
+      auto& wfRuntime = sparqlExpression::wf::WfRuntime::instance();
+      const auto& wasmUrl = wfRuntime.canonicalizeWasmUrl();
+      const auto& sinkUrl = wfRuntime.canonicalizeSinkUrl();
+      if (wasmUrl.empty() || sinkUrl.empty()) {
+        std::string msg =
+            "wf-canonicalize: /admin/canonicalize-sweep is not "
+            "configured. Set --wf-canonicalize-wasm-url and "
+            "--wf-alias-db on qlever-server startup to enable this "
+            "endpoint.\n";
+        response = createHttpResponseFromString(
+            msg, http::status::bad_request, request, MediaType::textPlain);
+      } else {
+        bool fullScan = false;
+        if (auto fs = checkParameter("full_scan", std::nullopt)) {
+          auto v = fs.value();
+          fullScan = (v == "true" || v == "1" || v == "yes");
+        }
+        AD_LOG_INFO
+            << "wf: /admin/canonicalize-sweep firing (wasm=" << wasmUrl
+            << " sink=" << sinkUrl << " full_scan=" << (fullScan ? "true" : "false")
+            << ")" << std::endl;
+        try {
+          std::string sweepResult =
+              wfRuntime.runCanonicalizeSweep(wasmUrl, sinkUrl, fullScan);
+          // The guest returns a binding-sets JSON; hand it back to the
+          // caller verbatim so the adapter can decode counts if it wants
+          // to. Wrap in a JSON envelope so an empty-registry sweep still
+          // produces a valid JSON body.
+          nlohmann::json body{{"status", "ok"},
+                              {"full_scan", fullScan},
+                              {"guest_result", nlohmann::json::parse(
+                                                   sweepResult, nullptr, false)}};
+          if (body["guest_result"].is_discarded()) {
+            // Guest reply wasn't valid JSON — pass it back as a string so
+            // the operator can see what came out.
+            body["guest_result"] = sweepResult;
+          }
+          response = createJsonResponse(body, request);
+        } catch (const std::exception& e) {
+          std::string msg = std::string("wf-canonicalize: sweep failed: ") +
+                            e.what() + "\n";
+          response = createHttpResponseFromString(
+              msg, http::status::internal_server_error, request,
+              MediaType::textPlain);
+        }
+      }
+    }
   }
 
   // Set description of KB index.
