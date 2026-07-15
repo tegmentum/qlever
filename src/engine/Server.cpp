@@ -1307,11 +1307,20 @@ CPP_template_def(typename VisitorT, typename RequestT, typename ResponseT)(
   // optional `exceptionErrorMsg`.
   std::optional<std::string> exceptionErrorMsg;
   std::optional<ExceptionMetadata> metadata;
+  // Suppress the `runtimeInformation` attachment on the error JSON when
+  // the failure is a signalled HTTP error (e.g. `wf-invoke: guest
+  // returned err: …` folded into a 502 Bad Gateway). The planning tree
+  // is meaningful for internal server errors but for a signalled
+  // downstream failure it just buries the exception message behind a
+  // multi-KB nested tree — and callers that truncate the response body
+  // (adapters that tail() the last N lines) never see the actual cause.
+  bool skipRuntimeInformation = false;
   try {
     co_return co_await std::visit(visitor, std::move(operation));
   } catch (const HttpError& e) {
     responseStatus = e.status();
     exceptionErrorMsg = e.what();
+    skipRuntimeInformation = true;
   } catch (const ParseException& e) {
     responseStatus = http::status::bad_request;
     exceptionErrorMsg = e.errorMessageWithoutPositionalInfo();
@@ -1359,15 +1368,22 @@ CPP_template_def(typename VisitorT, typename RequestT, typename ResponseT)(
     }
     auto errorResponseJson = composeErrorResponseJson(
         operationString, exceptionErrorMsg.value(), requestTimer, metadata);
-    if (plannedQuery.has_value()) {
+    if (plannedQuery.has_value() && !skipRuntimeInformation) {
       errorResponseJson["runtimeInformation"] =
           nlohmann::ordered_json(plannedQuery.value()
                                      .queryExecutionTree()
                                      .getRootOperation()
                                      ->runtimeInfo());
     }
-    auto errResponse =
-        createJsonResponse(errorResponseJson, request, responseStatus);
+    // Serialise: HttpError responses use compact single-line JSON so the
+    // exception message survives clients that display only the first line
+    // of the body (e.g. the wf-conformance adapter, `curl -s | head -1`).
+    // The 4-space pretty print is preserved for the general internal-
+    // server-error path where the runtimeInformation tree is worth reading.
+    auto errResponse = createJsonResponse(
+        skipRuntimeInformation ? errorResponseJson.dump()
+                               : errorResponseJson.dump(4),
+        request, responseStatus);
     co_return co_await send(std::move(errResponse));
   }
 }

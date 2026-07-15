@@ -14,6 +14,7 @@
 #include "backports/StartsWithAndEndsWith.h"
 #include "engine/CallFixedSize.h"
 #include "engine/ExportQueryExecutionTrees.h"
+#include "engine/HttpError.h"
 #include "engine/Sort.h"
 #include "engine/VariableToColumnMap.h"
 #include "engine/sparqlExpressions/WasmRuntime.h"
@@ -761,8 +762,21 @@ Result Service::computeResultFromWfInvoke(std::string idHex) {
   // where `cell` is a SPARQL-1.1-Results-JSON binding object (type/value/
   // datatype/xml:lang). `wfInvokeBindingsToResult` accepts either shape,
   // preferring the SPARQL-1.1 wire form when both are present.
-  std::string reply = sparqlExpression::wf::WfRuntime::instance().invokeById(
-      std::string_view{idHex});
+  //
+  // Rethrow any runtime-side failure as an HttpError(502 Bad Gateway):
+  // wf-invoke failures are by definition "downstream backend (the wasm
+  // guest) returned an error" — the correct HTTP mapping is 502, not 500
+  // (internal server error). Wrapping in HttpError also opts the response
+  // out of the noisy `runtimeInformation` attachment path in
+  // `Server::processQuery`, which would otherwise bury the guest error
+  // behind a multi-KB planning tree.
+  std::string reply;
+  try {
+    reply = sparqlExpression::wf::WfRuntime::instance().invokeById(
+        std::string_view{idHex});
+  } catch (const std::exception& e) {
+    throw HttpError(boost::beast::http::status::bad_gateway, e.what());
+  }
   return wfInvokeBindingsToResult(reply);
 }
 

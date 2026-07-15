@@ -12,6 +12,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/inlined_vector.h>
 
+#include "engine/HttpError.h"
 #include "engine/NamedResultCache.h"
 #include "engine/OperationBindPushDownImpl.h"
 #include "engine/QueryExecutionTree.h"
@@ -428,6 +429,14 @@ std::shared_ptr<const Result> Operation::getResult(
                  << std::endl;
     AD_LOG_DEBUG << getCacheKey();
     throw ad_utility::AbortException(e);
+  } catch (const HttpError& e) {
+    // Preserve signalled HTTP errors (e.g. `wf-invoke: guest returned err`
+    // folded into a 502 Bad Gateway) all the way up to `Server::processQuery`
+    // so the specific status + message reach the client verbatim. Without
+    // this branch the generic `std::exception` catch below would rewrap
+    // the failure as an `AbortException`, downgrading it to a plain 500.
+    runtimeInfo().status_ = RuntimeInformation::Status::failed;
+    throw;
   } catch (const std::exception& e) {
     // We are in the innermost level of the exception, so print
     AD_LOG_ERROR << "Aborted Operation" << std::endl;
